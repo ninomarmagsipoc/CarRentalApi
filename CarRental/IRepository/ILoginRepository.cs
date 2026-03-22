@@ -2,7 +2,7 @@
 
 namespace CarRental.IRepository
 {
-    public interface ILoginRespository
+    public interface ILoginRepository
     {
         Task<ServiceResponse<object>> GetLogin(string username, string password);
     }

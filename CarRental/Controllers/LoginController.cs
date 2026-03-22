@@ -7,8 +7,8 @@ namespace CarRental.Controllers
     [Route("api")]
     public class LoginController : Controller
     {
-        private ILoginRespository _login;
-        public LoginController(ILoginRespository login) 
+        private ILoginRepository _login;
+        public LoginController(ILoginRepository login) 
         {
             _login = login;
         }
@@ -17,8 +17,8 @@ namespace CarRental.Controllers
         [Route("GetLogin")]
         public async Task<IActionResult> GetUserLogin(string username, string password)
         {
-            var test = _login.GetLogin(username, password);
-            return Ok();
+            var result = await _login.GetLogin(username, password);
+            return Ok(result);
         }
     }
 }

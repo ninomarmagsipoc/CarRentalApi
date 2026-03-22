@@ -4,14 +4,14 @@ using System.Data.SqlClient;
 
 namespace CarRental.Server
 {
-    public class LoginClass : ILoginRespository
+    public class LoginClass : ILoginRepository
     {
         private readonly IConfiguration configuration;
         private readonly SqlConnection conn;
         public LoginClass(IConfiguration config)
         {
             configuration = config;
-            conn = new SqlConnection(config["ConnectionString:Car"]);
+            conn = new SqlConnection(config["ConnectionString:CarRental"]);
         }
         public Task<ServiceResponse<object>> GetLogin(string username, string password)
         {
