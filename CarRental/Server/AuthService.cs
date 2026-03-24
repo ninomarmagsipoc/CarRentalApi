@@ -1,5 +1,6 @@
 ﻿using CarRental.IRepository;
 using CarRental.Model.Response;
+using Microsoft.AspNetCore.SignalR.Protocol;
 using System.Data.SqlClient;
 
 namespace CarRental.Server
@@ -10,7 +11,7 @@ namespace CarRental.Server
 
         public AuthService(IConfiguration config)
         {
-            conn = new SqlConnection(config["ConnectionString:CarRental"]);
+            conn = new SqlConnection(config["ConnectionStrings:CarRental"]);
         }
 
         public async Task<ServiceResponse<object>> Register(RegisterRequest request)
@@ -50,6 +51,25 @@ namespace CarRental.Server
                 {
                     cmd.Parameters.AddWithValue("@Email", request.Email);
                     int count = (int)await cmd.ExecuteScalarAsync();
+
+                    string code = new Random().Next(100000, 999999).ToString();
+
+                    // 🔥 UPDATE user table with OTP & expiry
+                    string otpQuery = @"UPDATE Users 
+                    SET VerificationCode = @Code, VerificationExpiry = @Expiry 
+                    WHERE Email = @Email";
+
+                    using (SqlCommand otpCmd = new SqlCommand(otpQuery, conn))
+                    {
+                        otpCmd.Parameters.AddWithValue("@Code", code);
+                        otpCmd.Parameters.AddWithValue("@Expiry", DateTime.UtcNow.AddMinutes(15));
+                        otpCmd.Parameters.AddWithValue("@Email", request.Email);
+                        await otpCmd.ExecuteNonQueryAsync();
+                    }
+
+                    // 🔥 SEND EMAIL
+                    await SendOtpEmail(request.Email, code);
+
                     if (count > 0)
                     {
                         response.StatusCode = 400;
@@ -127,6 +147,13 @@ namespace CarRental.Server
                             return response;
                         }
 
+                        if (!request.Email.Contains("@"))
+                        {
+                            response.StatusCode = 400;
+                            response.Message = "Invalid email format.";
+                            return response;
+                        }
+
                         response.StatusCode = 200;
                         response.Message = "Login successful.";
                         response.Data = new
@@ -154,6 +181,134 @@ namespace CarRental.Server
                 conn.Close();
             }
             return response;
+        }
+
+        public async Task<ServiceResponse<object>> SendOtp(string email)
+        {
+            var response = new ServiceResponse<object>();
+            try
+            {
+                await conn.OpenAsync();
+
+                string code = new Random().Next(100000, 999999).ToString();
+
+                string query = @"UPDATE Users SET VerificationCode = @Code, VerificationExpiry = @Expiry WHERE Email = @Email";
+
+                using (SqlCommand cmd = new SqlCommand(query, conn))
+                {
+                    cmd.Parameters.AddWithValue("@Code", code);
+                    cmd.Parameters.AddWithValue("@Expiry", DateTime.UtcNow.AddMinutes(15));
+                    cmd.Parameters.AddWithValue("@Email", email);
+                    int rows = await cmd.ExecuteNonQueryAsync();
+                    if (rows == 0)
+                    {
+                        response.StatusCode = 404;
+                        response.Message = "User not found.";
+                        return response;
+                    }
+                }
+
+                await SendOtpEmail(email, code);
+
+                response.StatusCode = 200;
+                response.Message = "OTP sent successfully.";
+            }
+            catch (Exception ex)
+            {
+
+                response.StatusCode = 500;
+                response.Message = ex.Message;
+
+            }
+            finally
+            {
+                await conn.CloseAsync();
+            }
+            return response;
+        }
+
+        public async Task<ServiceResponse<object>> VerifyOtp(string email, string code)
+        {
+            var response = new ServiceResponse<object>();
+            try
+            {
+                await conn.OpenAsync();
+                string query = @"SELECT VerificationCode, VerificationExpiry FROM Users WHERE Email = @Email";
+                using (SqlCommand cmd = new SqlCommand(query, conn))
+                {
+                    cmd.Parameters.AddWithValue("@Email", email);
+                    var reader = await cmd.ExecuteReaderAsync();
+                    if (reader.Read())
+                    {
+                        string storedCode = reader["VerificationCode"].ToString();
+                        DateTime expiry = reader["VerificationExpiry"] == DBNull.Value
+                    ? DateTime.MinValue
+                    : (DateTime)reader["VerificationExpiry"];
+                        if (DateTime.UtcNow > expiry)
+                        {
+                            response.StatusCode = 400;
+                            response.Message = "OTP has expired.";
+                            return response;
+                        }
+                        if (storedCode != code)
+                        {
+                            response.StatusCode = 400;  
+                            response.Message = "Invalid OTP.";
+                            return response;
+                        }
+
+                        reader.Close();
+
+                        string update = @"UPDATE Users SET IsVerified = 1 WHERE Email = @Email";
+
+                        using (SqlCommand updateCmd = new SqlCommand(update, conn))
+                        {
+                            updateCmd.Parameters.AddWithValue("@Email", email);
+                            await updateCmd.ExecuteNonQueryAsync();
+                        }
+
+                        response.StatusCode = 200;
+                        response.Message = "OTP verified successfully.";
+                    }
+                    else
+                    {
+                        response.StatusCode = 404;
+                        response.Message = "User not found.";
+                    }
+                }
+            }
+            catch (Exception ex)
+            {
+                response.StatusCode = 500;
+                response.Message = ex.Message;
+            }
+            finally
+            {
+                await conn.CloseAsync();
+            }
+            return response;
+
+        }
+
+        public async Task SendOtpEmail(string email, string code)
+        {
+            var message = new MimeKit.MimeMessage();
+            message.From.Add(new MimeKit.MailboxAddress("Car Rental", "ninomarmagsipoc@gmail.com"));
+            message.To.Add(new MimeKit.MailboxAddress("", email));
+            message.Subject = "Your OTP Code";
+
+            message.Body = new MimeKit.TextPart("plain")
+            {
+                Text = $"Your OTP code is: {code}. It will expire in 15 minutes."
+            };
+
+            using (var client = new MailKit.Net.Smtp.SmtpClient())
+            {
+                await client.ConnectAsync("smtp.gmail.com", 587, MailKit.Security.SecureSocketOptions.StartTls);
+                await client.AuthenticateAsync("ninomarmagsipoc@gmail.com", "roen fdiw kwod icav");
+                await client.SendAsync(message);
+                await client.DisconnectAsync(true);
+            }
         }
     }
 }

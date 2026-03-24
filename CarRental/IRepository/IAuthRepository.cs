@@ -6,5 +6,7 @@ namespace CarRental.IRepository
     {
         Task<ServiceResponse<object>> Register(RegisterRequest request);
         Task<ServiceResponse<object>> Login(LoginRequest request);
+        Task<ServiceResponse<object>> SendOtp(string email);
+        Task<ServiceResponse<object>> VerifyOtp(string email, string code);
     }
 }
