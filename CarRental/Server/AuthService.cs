@@ -52,24 +52,6 @@ namespace CarRental.Server
                     cmd.Parameters.AddWithValue("@Email", request.Email);
                     int count = (int)await cmd.ExecuteScalarAsync();
 
-                    string code = new Random().Next(100000, 999999).ToString();
-
-                    // 🔥 UPDATE user table with OTP & expiry
-                    string otpQuery = @"UPDATE Users 
-                    SET VerificationCode = @Code, VerificationExpiry = @Expiry 
-                    WHERE Email = @Email";
-
-                    using (SqlCommand otpCmd = new SqlCommand(otpQuery, conn))
-                    {
-                        otpCmd.Parameters.AddWithValue("@Code", code);
-                        otpCmd.Parameters.AddWithValue("@Expiry", DateTime.UtcNow.AddMinutes(15));
-                        otpCmd.Parameters.AddWithValue("@Email", request.Email);
-                        await otpCmd.ExecuteNonQueryAsync();
-                    }
-
-                    // 🔥 SEND EMAIL
-                    await SendOtpEmail(request.Email, code);
-
                     if (count > 0)
                     {
                         response.StatusCode = 400;
@@ -92,6 +74,23 @@ namespace CarRental.Server
 
                     await cmd.ExecuteNonQueryAsync();
                 }
+
+                string code = new Random().Next(100000, 999999).ToString();
+
+               
+                string otpQuery = @"UPDATE Users 
+                    SET VerificationCode = @Code, VerificationExpiry = @Expiry 
+                    WHERE Email = @Email";
+
+                using (SqlCommand otpCmd = new SqlCommand(otpQuery, conn))
+                {
+                    otpCmd.Parameters.AddWithValue("@Code", code);
+                    otpCmd.Parameters.AddWithValue("@Expiry", DateTime.UtcNow.AddMinutes(1));
+                    otpCmd.Parameters.AddWithValue("@Email", request.Email);
+                    await otpCmd.ExecuteNonQueryAsync();
+                }
+
+                await SendOtpEmail(request.Email, code);
 
                 response.StatusCode = 200;
                 response.Message = "User registered successfully.";
@@ -125,7 +124,7 @@ namespace CarRental.Server
 
                 await conn.OpenAsync();
 
-                string query = @"SELECT Id, FirstName, LastName, Email, PasswordHash
+                string query = @"SELECT Id, FirstName, LastName, Email, PasswordHash, IsVerified
                                     FROM Users WHERE Email = @Email";
 
                 using (SqlCommand cmd = new SqlCommand(query, conn))
@@ -154,6 +153,18 @@ namespace CarRental.Server
                             return response;
                         }
 
+                        
+
+                        bool isVerified = (bool)reader["IsVerified"];
+
+                        if (!isVerified)
+                        {
+                            response.StatusCode = 400;
+                            response.Message = "Email is not Verified, Please Verify it";
+                            response.Data = new { IsVerified = false };
+                            return response;
+                        }
+
                         response.StatusCode = 200;
                         response.Message = "Login successful.";
                         response.Data = new
@@ -161,7 +172,8 @@ namespace CarRental.Server
                             Id = reader["Id"],
                             FirstName = reader["FirstName"],
                             LastName = reader["LastName"],
-                            Email = reader["Email"]
+                            Email = reader["Email"],
+                            IsVerified = isVerified
                         };
                     }
                     else
@@ -197,7 +209,7 @@ namespace CarRental.Server
                 using (SqlCommand cmd = new SqlCommand(query, conn))
                 {
                     cmd.Parameters.AddWithValue("@Code", code);
-                    cmd.Parameters.AddWithValue("@Expiry", DateTime.UtcNow.AddMinutes(15));
+                    cmd.Parameters.AddWithValue("@Expiry", DateTime.UtcNow.AddMinutes(1));
                     cmd.Parameters.AddWithValue("@Email", email);
                     int rows = await cmd.ExecuteNonQueryAsync();
                     if (rows == 0)
@@ -259,7 +271,9 @@ namespace CarRental.Server
 
                         reader.Close();
 
-                        string update = @"UPDATE Users SET IsVerified = 1 WHERE Email = @Email";
+                        string update = @"UPDATE Users 
+                  SET IsVerified = 1, VerificationCode = NULL, VerificationExpiry = NULL 
+                  WHERE Email = @Email"; ;
 
                         using (SqlCommand updateCmd = new SqlCommand(update, conn))
                         {
@@ -299,7 +313,7 @@ namespace CarRental.Server
 
             message.Body = new MimeKit.TextPart("plain")
             {
-                Text = $"Your OTP code is: {code}. It will expire in 15 minutes."
+                Text = $"Your OTP code is: {code}. It will expire in 1 minute."
             };
 
             using (var client = new MailKit.Net.Smtp.SmtpClient())

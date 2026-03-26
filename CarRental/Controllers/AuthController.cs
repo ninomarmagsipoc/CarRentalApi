@@ -20,14 +20,17 @@ namespace CarRental.Controllers
         public async Task<IActionResult> Register([FromBody] RegisterRequest request)
         {
             var result = await _auth.Register(request);
-            return StatusCode(result.StatusCode, request);
+            return StatusCode(result.StatusCode, result);
         }
 
         [HttpPost("login")]
         public async Task<IActionResult> Login([FromBody] LoginRequest request)
         {
             var result = await _auth.Login(request);
-            return StatusCode(result.StatusCode, request);
+
+            
+
+            return StatusCode(result.StatusCode, result);
         }
 
         [HttpPost("send-otp")]
@@ -35,7 +38,7 @@ namespace CarRental.Controllers
         public async Task<IActionResult> SendOtp(string email)
         {
             var result = await _auth.SendOtp(email);
-            return StatusCode(result.StatusCode, email);
+            return Ok(result);
         }
 
         [HttpPost("verify-otp")]
