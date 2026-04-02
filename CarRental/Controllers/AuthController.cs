@@ -28,7 +28,7 @@ namespace CarRental.Controllers
         {
             var result = await _auth.Login(request);
 
-            
+
 
             return StatusCode(result.StatusCode, result);
         }
@@ -38,7 +38,7 @@ namespace CarRental.Controllers
         public async Task<IActionResult> SendOtp(string email)
         {
             var result = await _auth.SendOtp(email);
-            return Ok(result);
+            return StatusCode(result.StatusCode, result);
         }
 
         [HttpPost("verify-otp")]
@@ -46,6 +46,20 @@ namespace CarRental.Controllers
         public async Task<IActionResult> VerifyOtp(string email, string code)
         {
             var result = await _auth.VerifyOtp(email, code);
+            return StatusCode(result.StatusCode, result);
+        }
+
+        [HttpPost("send-reset-otp")]
+        public async Task<IActionResult> SendResetOtp(string email)
+        {
+            var result = await _auth.SendResetOtp(email);
+            return StatusCode(result.StatusCode, result);
+        }
+
+        [HttpPost("reset-password")]
+        public async Task<IActionResult> ResetPassword(string email, string code, string newPassword)
+        {
+            var result = await _auth.ResetPassword(email, code, newPassword);
             return StatusCode(result.StatusCode, result);
         }
     }

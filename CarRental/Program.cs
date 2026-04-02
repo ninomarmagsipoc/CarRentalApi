@@ -24,6 +24,7 @@ builder.Services.AddControllers()
     });
 
 builder.Services.AddScoped<IAuthRepository, AuthService>();
+builder.Services.AddScoped<ICarRepository, CarService>();
 builder.Services.AddScoped<ILoginRepository, LoginClass>();
 builder.Services.AddControllers();
 // Learn more about configuring Swagger/OpenAPI at https://aka.ms/aspnetcore/swashbuckle

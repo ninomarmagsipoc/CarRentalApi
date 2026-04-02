@@ -124,7 +124,7 @@ namespace CarRental.Server
 
                 await conn.OpenAsync();
 
-                string query = @"SELECT Id, FirstName, LastName, Email, PasswordHash, IsVerified
+                string query = @"SELECT Id, FirstName, LastName, Email, PasswordHash, IsVerified, Role
                                     FROM Users WHERE Email = @Email";
 
                 using (SqlCommand cmd = new SqlCommand(query, conn))
@@ -135,6 +135,7 @@ namespace CarRental.Server
 
                     if (reader.Read())
                     {
+                        string role = reader["Role"].ToString();
                         string hash = reader["PasswordHash"].ToString();
 
                         bool valid = BCrypt.Net.BCrypt.Verify(request.Password, hash);
@@ -173,7 +174,8 @@ namespace CarRental.Server
                             FirstName = reader["FirstName"],
                             LastName = reader["LastName"],
                             Email = reader["Email"],
-                            IsVerified = isVerified
+                            IsVerified = isVerified,
+                            Role = role
                         };
                     }
                     else
@@ -252,7 +254,7 @@ namespace CarRental.Server
                     var reader = await cmd.ExecuteReaderAsync();
                     if (reader.Read())
                     {
-                        string storedCode = reader["VerificationCode"].ToString();
+                        string storedCode = reader["VerificationCode"]?.ToString();
                         DateTime expiry = reader["VerificationExpiry"] == DBNull.Value
                     ? DateTime.MinValue
                     : (DateTime)reader["VerificationExpiry"];
@@ -313,7 +315,160 @@ namespace CarRental.Server
 
             message.Body = new MimeKit.TextPart("plain")
             {
-                Text = $"Your OTP code is: {code}. It will expire in 1 minute."
+                Text = $"Your OTP code is: {code}. It will expire in 5 minute."
+            };
+
+            using (var client = new MailKit.Net.Smtp.SmtpClient())
+            {
+                await client.ConnectAsync("smtp.gmail.com", 587, MailKit.Security.SecureSocketOptions.StartTls);
+                await client.AuthenticateAsync("ninomarmagsipoc@gmail.com", "roen fdiw kwod icav");
+                await client.SendAsync(message);
+                await client.DisconnectAsync(true);
+            }
+        }
+
+        public async Task<ServiceResponse<object>> SendResetOtp(string email)
+        {
+
+            var response = new ServiceResponse<object>();
+
+            try
+            {
+                await conn.OpenAsync();
+
+                string code = new Random().Next(100000, 999999).ToString();
+
+                string query = @"UPDATE Users SET ResetToken = @Code, ResetTokenExpiry = @Expiry WHERE Email = @Email";
+
+                using (SqlCommand cmd = new SqlCommand(query, conn))
+                {
+
+                    cmd.Parameters.AddWithValue("@Code", code);
+                    cmd.Parameters.AddWithValue("@Expiry", DateTime.UtcNow.AddMinutes(5));
+                    cmd.Parameters.AddWithValue("@Email", email);
+
+                    int rows = await cmd.ExecuteNonQueryAsync();
+
+                    if (rows == 0)
+                    {
+                        response.StatusCode = 404;
+                        response.Message = "User not found.";
+                        return response;
+                    }
+                }
+
+                await ResetPassSendOtpEmail(email, code);
+
+                response.StatusCode = 200;
+                response.Message = "Password reset OTP sent successfully.";
+            }
+            catch (Exception ex)
+            {
+                response.StatusCode = 500;
+                response.Message = ex.Message;
+            }
+            finally
+            {
+                await conn.CloseAsync();
+
+            }
+            return response;
+        }
+
+        public async Task<ServiceResponse<object>> ResetPassword(string email, string code, string newPassword)
+        {
+            var response = new ServiceResponse<object>();
+
+            try
+            {
+                await conn.OpenAsync();
+
+                string query = @"SELECT ResetToken, ResetTokenExpiry FROM Users WHERE Email = @Email";
+
+                using (SqlCommand cmd = new SqlCommand(query, conn))
+                {
+                    cmd.Parameters.AddWithValue("@Email", email);
+
+                    var reader = await cmd.ExecuteReaderAsync();
+
+                    if (!reader.Read())
+                    {
+                        response.StatusCode = 404;
+                        response.Message = "User not found.";
+                        return response;
+                    }
+
+                    string storedCode = reader["ResetToken"]?.ToString();
+                    DateTime expiry = reader["ResetTokenExpiry"] == DBNull.Value ?
+                        DateTime.MinValue :
+                        (DateTime)reader["ResetTokenExpiry"];
+
+                    if (DateTime.UtcNow > expiry)
+                    {
+                        reader.Close();
+                        response.StatusCode = 400;
+                        response.Message = "Reset token has expired.";
+                        return response;
+                    }
+
+                    if (storedCode != code)
+                    {
+                        reader.Close();
+                        response.StatusCode = 400;
+                        response.Message = "Invalid reset token.";
+                        return response;
+                    }
+
+                    reader.Close();
+
+                    if (string.IsNullOrWhiteSpace(newPassword) || newPassword.Length < 6)
+                    {
+                        response.StatusCode = 400;
+                        response.Message = "Password must be at least 6 characters.";
+                        return response;
+                    }
+
+                    string hash = BCrypt.Net.BCrypt.HashPassword(newPassword);
+
+                    string update = @"UPDATE Users 
+                        SET PasswordHash = @Hash, ResetToken = NULL, ResetTokenExpiry = NULL, UpdatedAt = @UpdatedAt 
+                        WHERE Email = @Email";
+
+                    using (SqlCommand updateCmd = new SqlCommand(update, conn))
+                    {
+                        updateCmd.Parameters.AddWithValue("@Hash", hash);
+                        updateCmd.Parameters.AddWithValue("@Email", email);
+                        updateCmd.Parameters.AddWithValue("@UpdatedAt", DateTime.UtcNow);
+
+                        await updateCmd.ExecuteNonQueryAsync();
+                    }
+
+                    response.StatusCode = 200;
+                    response.Message = "Password reset successfully.";
+                }
+            }
+            catch (Exception ex)
+            {
+                response.StatusCode = 500;
+                response.Message = ex.Message;
+            }
+            finally
+            {
+                await conn.CloseAsync();
+            }
+            return response;
+        }
+
+        public async Task ResetPassSendOtpEmail(string email, string code)
+        {
+            var message = new MimeKit.MimeMessage();
+            message.From.Add(new MimeKit.MailboxAddress("Car Rental", "ninomarmagsipoc@gmail.com"));
+            message.To.Add(new MimeKit.MailboxAddress("", email));
+            message.Subject = "Your OTP Code";
+
+            message.Body = new MimeKit.TextPart("plain")
+            {
+                Text = $"Your OTP code is: {code}. Reset your password now It will expire in 5 minute."
             };
 
             using (var client = new MailKit.Net.Smtp.SmtpClient())
