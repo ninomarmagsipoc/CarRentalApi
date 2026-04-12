@@ -1,4 +1,5 @@
 ﻿using CarRental.IRepository;
+using CarRental.Model;
 using CarRental.Model.Response;
 using Microsoft.AspNetCore.Mvc;
 
@@ -60,6 +61,13 @@ namespace CarRental.Controllers
         public async Task<IActionResult> ResetPassword(string email, string code, string newPassword)
         {
             var result = await _auth.ResetPassword(email, code, newPassword);
+            return StatusCode(result.StatusCode, result);
+        }
+
+        [HttpPost("upload-profile")]
+        public async Task<IActionResult> UploadProfile([FromForm] UploadProfileRequest request)
+        {
+            var result = await _auth.UploadProfile(request);
             return StatusCode(result.StatusCode, result);
         }
     }
