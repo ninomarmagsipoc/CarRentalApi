@@ -1,4 +1,5 @@
-﻿using CarRental.Model.Response;
+﻿using CarRental.Model;
+using CarRental.Model.Response;
 
 namespace CarRental.IRepository
 {
@@ -16,5 +17,8 @@ namespace CarRental.IRepository
         //Forgot password
         Task<ServiceResponse<object>> SendResetOtp(string email);
         Task<ServiceResponse<object>> ResetPassword(string email, string code, string newPassword);
+
+        //Update Photo
+        Task<ServiceResponse<UploadProfileResponse>> UploadProfile(UploadProfileRequest request);
     }
 }

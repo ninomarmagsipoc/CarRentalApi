@@ -1,4 +1,5 @@
 ﻿using CarRental.IRepository;
+using CarRental.Model;
 using CarRental.Model.Response;
 using Microsoft.AspNetCore.SignalR.Protocol;
 using System.Data.SqlClient;
@@ -8,10 +9,12 @@ namespace CarRental.Server
     public class AuthService : IAuthRepository
     {
         private readonly SqlConnection conn;
+        private readonly IWebHostEnvironment _env;
 
-        public AuthService(IConfiguration config)
+        public AuthService(IConfiguration config, IWebHostEnvironment env)
         {
             conn = new SqlConnection(config["ConnectionStrings:CarRental"]);
+            _env = env;
         }
 
         public async Task<ServiceResponse<object>> Register(RegisterRequest request)
@@ -124,7 +127,7 @@ namespace CarRental.Server
 
                 await conn.OpenAsync();
 
-                string query = @"SELECT Id, FirstName, LastName, Email, PasswordHash, IsVerified, Role
+                string query = @"SELECT Id, FirstName, LastName, Email, PasswordHash, IsVerified, Role, ProfileImage
                                     FROM Users WHERE Email = @Email";
 
                 using (SqlCommand cmd = new SqlCommand(query, conn))
@@ -175,7 +178,8 @@ namespace CarRental.Server
                             LastName = reader["LastName"],
                             Email = reader["Email"],
                             IsVerified = isVerified,
-                            Role = role
+                            Role = role,
+                            ProfileImage = reader["ProfileImage"] == DBNull.Value ? "https://i.pravatar.cc/150" : reader["ProfileImage"].ToString()
                         };
                     }
                     else
@@ -478,6 +482,77 @@ namespace CarRental.Server
                 await client.SendAsync(message);
                 await client.DisconnectAsync(true);
             }
+        }
+
+        public async Task<ServiceResponse<UploadProfileResponse>> UploadProfile(UploadProfileRequest request)
+        {
+            var response = new ServiceResponse<UploadProfileResponse>();
+
+            try 
+            {
+                if (request.File == null || request.File.Length == 0)
+                {
+                    response.StatusCode = 400;
+                    response.Message = "No file uploaded.";
+                    return response;
+                }
+
+                // ✅ Validate file type
+                var allowedTypes = new[] { "image/jpeg", "image/png", "image/jpg" };
+                if (!allowedTypes.Contains(request.File.ContentType))
+                {
+                    response.StatusCode = 400;
+                    response.Message = "Only JPG and PNG allowed.";
+                    return response;
+                }
+
+                // ✅ Create uploads folder if not exists
+                var uploadPath = Path.Combine(_env.WebRootPath, "upload");
+                if (!Directory.Exists(uploadPath))
+                {
+                    Directory.CreateDirectory(uploadPath);
+                }
+
+                // ✅ Generate filename
+                var fileName = $"{Guid.NewGuid()}_{request.File.FileName}";
+                var filePath = Path.Combine(uploadPath, fileName);
+
+                // ✅ Save file
+                using (var stream = new FileStream(filePath, FileMode.Create))
+                {
+                    await request.File.CopyToAsync(stream);
+                }
+
+                string imageUrl = $"/upload/{fileName}";
+
+                await conn.OpenAsync();
+
+                string query = "UPDATE Users Set ProfileImage = @Image Where Id = @Id";
+
+                using (SqlCommand cmd = new SqlCommand(query, conn))
+                {
+                    cmd.Parameters.AddWithValue("@Image", imageUrl);
+                    cmd.Parameters.AddWithValue("@Id", request.UserId);
+
+                    await cmd.ExecuteNonQueryAsync();
+                }
+                response.StatusCode = 200;
+                response.Message = "Profile Uploaded Successfully";
+                response.Data = new UploadProfileResponse
+                {
+                    ImageUrl = imageUrl
+                };
+            } catch (Exception ex)
+            {
+                response.StatusCode = 500;
+                response.Message = ex.Message;
+            }
+
+            finally
+            {
+                await conn.CloseAsync();
+            }
+            return response;
         }
     }
 }

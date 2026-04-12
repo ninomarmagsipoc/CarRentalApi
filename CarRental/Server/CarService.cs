@@ -8,7 +8,7 @@ namespace CarRental.Server
     {
         private readonly SqlConnection conn;
 
-        public CarService(IConfiguration config) 
+        public CarService(IConfiguration config)
         {
             conn = new SqlConnection(config["ConnectionStrings:CarRental"]);
         }
@@ -18,17 +18,26 @@ namespace CarRental.Server
             var response = new ServiceResponse<object>();
             var cars = new List<object>();
 
-            try 
+            try
             {
                 await conn.OpenAsync();
 
-                string query = "SELECT * FROM Cars";
+                // UPDATE: New query uses NOT EXISTS to filter out cars currently in the Rentals table
+                // with an active status and an overlapping date range.
+                string query = @"
+                    SELECT c.* FROM Cars c
+                    WHERE NOT EXISTS (
+                        SELECT 1 
+                        FROM Rentals r 
+                        WHERE r.CarID = c.CarID 
+                        AND r.Status IN ('Pending', 'Rented', 'Active') 
+                        AND CAST(GETDATE() AS DATE) BETWEEN r.StartDate AND r.EndDate
+                    )";
 
-                using (SqlCommand cmd = new SqlCommand(query, conn)) 
+                using (SqlCommand cmd = new SqlCommand(query, conn))
                 {
-                    using (SqlDataReader reader = await cmd.ExecuteReaderAsync()) 
+                    using (SqlDataReader reader = await cmd.ExecuteReaderAsync())
                     {
-
                         while (await reader.ReadAsync())
                         {
                             cars.Add(new
@@ -42,21 +51,21 @@ namespace CarRental.Server
                             });
                         }
                     }
-                   
                 }
 
                 response.StatusCode = 200;
                 response.Data = cars;
-            } 
-            catch(Exception ex) 
+            }
+            catch (Exception ex)
             {
                 response.StatusCode = 500;
                 response.Message = ex.Message;
             }
-            finally 
+            finally
             {
                 await conn.CloseAsync();
             }
+
             return response;
         }
 
