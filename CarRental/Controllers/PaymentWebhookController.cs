@@ -1,6 +1,6 @@
 ﻿using Microsoft.AspNetCore.Mvc;
 using System.Text.Json;
-using System.Data.SqlClient;
+using CarRental.IRepository; // 🟢 Injected your repository
 
 namespace CarRental.Controllers
 {
@@ -8,11 +8,11 @@ namespace CarRental.Controllers
     [Route("api/webhook")]
     public class PaymentWebhookController : ControllerBase
     {
-        private readonly string _connectionString;
+        private readonly IPaymentRepository _paymentRepo;
 
-        public PaymentWebhookController(IConfiguration config)
+        public PaymentWebhookController(IPaymentRepository paymentRepo)
         {
-            _connectionString = config["ConnectionStrings:CarRental"];
+            _paymentRepo = paymentRepo;
         }
 
         [HttpPost("paymongo")]
@@ -21,19 +21,20 @@ namespace CarRental.Controllers
             using var reader = new StreamReader(Request.Body);
             var body = await reader.ReadToEndAsync();
 
-            var json = JsonDocument.Parse(body);
-
             try
             {
+                using var json = JsonDocument.Parse(body);
+
                 var eventType = json.RootElement
                     .GetProperty("data")
                     .GetProperty("attributes")
                     .GetProperty("type")
                     .GetString();
 
-                // 🔥 IMPORTANT EVENTS
-                if (eventType == "link.payment.paid")
+                // 🟢 Listen specifically for Checkout Sessions
+                if (eventType == "checkout_session.payment.paid")
                 {
+                    // Grab the 'cs_xxxxxx' ID
                     var reference = json.RootElement
                         .GetProperty("data")
                         .GetProperty("attributes")
@@ -41,65 +42,21 @@ namespace CarRental.Controllers
                         .GetProperty("id")
                         .GetString();
 
-                    await MarkPaymentAsPaid(reference);
+                    if (!string.IsNullOrEmpty(reference))
+                    {
+                         await _paymentRepo.VerifyPayment(reference);
+                    }
                 }
 
-                if (eventType == "link.payment.failed")
-                {
-                    var reference = json.RootElement
-                        .GetProperty("data")
-                        .GetProperty("attributes")
-                        .GetProperty("data")
-                        .GetProperty("id")
-                        .GetString();
-
-                    await MarkPaymentAsFailed(reference);
-                }
-
+                // Always return 200 OK so PayMongo knows you received it safely
                 return Ok();
             }
             catch (Exception ex)
             {
-                return BadRequest($"Webhook Error: {ex.Message}");
+              
+                Console.WriteLine($"Webhook Error: {ex.Message}");
+                return Ok();
             }
-        }
-
-        // ===========================
-        // UPDATE DB METHODS
-        // ===========================
-
-        private async Task MarkPaymentAsPaid(string reference)
-        {
-            using var conn = new SqlConnection(_connectionString);
-            await conn.OpenAsync();
-
-            string query = @"
-                UPDATE Payment
-                SET PaymentStatus = 'Paid'
-                WHERE PayMongoRef = @Ref
-            ";
-
-            using var cmd = new SqlCommand(query, conn);
-            cmd.Parameters.AddWithValue("@Ref", reference);
-
-            await cmd.ExecuteNonQueryAsync();
-        }
-
-        private async Task MarkPaymentAsFailed(string reference)
-        {
-            using var conn = new SqlConnection(_connectionString);
-            await conn.OpenAsync();
-
-            string query = @"
-                UPDATE Payment
-                SET PaymentStatus = 'Failed'
-                WHERE PayMongoRef = @Ref
-            ";
-
-            using var cmd = new SqlCommand(query, conn);
-            cmd.Parameters.AddWithValue("@Ref", reference);
-
-            await cmd.ExecuteNonQueryAsync();
         }
     }
 }
