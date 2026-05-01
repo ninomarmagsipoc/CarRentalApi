@@ -25,26 +25,12 @@ namespace CarRental.Controllers
         }
 
         [HttpPost("create-balance/{rentalId}")]
-        public async Task<ActionResult<ServiceResponse<PaymentResponse>>> CreateBalancePayment(int rentalId)
+        public async Task<IActionResult> CreateBalancePayment(int rentalId, [FromBody] PaymentUrlRequest request)
         {
-            var response = await _payment.CreateBalancePayment(rentalId);
+            var response = await _payment.CreateBalancePayment(rentalId, request.SuccessUrl, request.CancelUrl);
 
-            // Standardizing the HTTP Status codes based on your ServiceResponse
-            if (response.StatusCode == 200)
-            {
-                return Ok(response);
-            }
-            if (response.StatusCode == 400)
-            {
-                return BadRequest(response);
-            }
-            if (response.StatusCode == 404)
-            {
-                return NotFound(response);
-            }
-
-            // Fallback for 500 errors
-            return StatusCode(response.StatusCode, response);
+            if (response.StatusCode == 200) return Ok(response);
+            return BadRequest(response);
         }
 
         [HttpPost("verify")]
@@ -95,6 +81,29 @@ namespace CarRental.Controllers
         {
             var result = await _payment.GetRemainingBalance(rentalId);
             return StatusCode(result.StatusCode, result);
+        }
+
+        [HttpPost("penalty")]
+        public async Task<IActionResult> CreatePenaltyPayment([FromBody] PenaltyRequest request)
+        {
+            // Karon, kumpleto na ang 4 ka parameters nga gipangita sa Service!
+            var response = await _payment.CreatePenaltyPayment(
+                request.RentalID,
+                request.Amount,
+                request.SuccessUrl,
+                request.CancelUrl
+            );
+
+            if (response.StatusCode == 200) return Ok(response);
+            return BadRequest(response);
+        }
+
+        [HttpPost("cash-payment")]
+        public async Task<ActionResult<ServiceResponse<bool>>> ProcessCashPayment([FromBody] CashPaymentRequest request)
+        {
+            var result = await _payment.ProcessCashBalancePayment(request);
+            if (result.StatusCode == 200) return Ok(result);
+            return BadRequest(result);
         }
 
     }

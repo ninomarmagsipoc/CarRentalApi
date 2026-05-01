@@ -70,5 +70,42 @@ namespace CarRental.Controllers
             var result = await _auth.UploadProfile(request);
             return StatusCode(result.StatusCode, result);
         }
+
+        [HttpPost("update-profile")]
+        public async Task<IActionResult> UpdateProfile(UpdateProfileRequest request)
+        {
+            var response = await _auth.UpdateProfile(request);
+            if (response.StatusCode == 200) return Ok(response);
+            return BadRequest(response);
+        }
+
+        [HttpGet("customers")]
+        public async Task<ActionResult<ServiceResponse<List<CustomerDto>>>> GetAllCustomers()
+        {
+            var response = await _auth.GetAllCustomers();
+            if (response.StatusCode == 200)
+                return Ok(response);
+            return BadRequest(response);
+        }
+
+        [HttpPut("customers/{id}/toggle-block")]
+        public async Task<ActionResult<ServiceResponse<string>>> ToggleBlockUser(int id, [FromQuery] bool isBlocked)
+        {
+            var response = await _auth.ToggleBlockUser(id, isBlocked);
+            if (response.StatusCode == 200)
+                return Ok(response);
+
+            return BadRequest(response);
+        }
+
+        [HttpGet("customers/{id}/history")]
+        public async Task<ActionResult<ServiceResponse<List<CustomerRentalHistoryDto>>>> GetCustomerRentalHistory(int id)
+        {
+            var response = await _auth.GetCustomerRentalHistory(id);
+            if (response.StatusCode == 200)
+                return Ok(response);
+
+            return BadRequest(response);
+        }
     }
 }

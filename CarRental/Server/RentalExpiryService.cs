@@ -19,10 +19,8 @@ namespace CarRental.Server
             while (!stoppingToken.IsCancellationRequested)
             {
                 await DeleteAbandonedBookings();
-
-                await RejectExpiredRentals();
                 // Check every 1 minute
-                await Task.Delay(TimeSpan.FromMinutes(1), stoppingToken);
+                await Task.Delay(TimeSpan.FromMinutes(10), stoppingToken);
             }
         }
 
@@ -50,7 +48,7 @@ namespace CarRental.Server
 
             if (affected > 0)
             {
-                // Note: affected counts rows deleted from both tables
+                //affected counts rows deleted from both tables
                 Console.WriteLine($"Automatically deleted abandoned initial checkouts (5-minute rule).");
             }
         }

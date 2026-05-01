@@ -1,4 +1,5 @@
 
+using CarRental.Hub;
 using CarRental.IRepository;
 using CarRental.Model;
 using CarRental.Server;
@@ -12,9 +13,10 @@ builder.Services.AddCors(options =>
     options.AddPolicy("MyFrontendPolicy",
         policy =>
         {
-            policy.WithOrigins("http://localhost:5173", "http://127.0.0.1:5173", "http://localhost:51426") // Your frontend URL
+            policy.WithOrigins("http://localhost:55479", "http://127.0.0.1:5173", "http://10.0.2.2:5554") // Your frontend URL
                   .AllowAnyHeader()
-                  .AllowAnyMethod();
+                  .AllowAnyMethod()
+                  .AllowCredentials();
         });//
 });
 
@@ -25,6 +27,8 @@ builder.Services.AddControllers()
     });
 
 builder.Services.AddHttpClient();
+
+builder.Services.AddSignalR();
 
 builder.Services.AddScoped<IPaymentRepository, PaymentService>();
 builder.Services.AddScoped<IAuthRepository, AuthService>();
@@ -47,9 +51,11 @@ if (app.Environment.IsDevelopment())
     app.UseSwaggerUI();
 }
 
-app.UseHttpsRedirection();
+//app.UseHttpsRedirection();
 
 app.UseCors("MyFrontendPolicy");
+
+app.MapHub<NotificationHub>("/notificationHub");
 
 app.UseStaticFiles();
 

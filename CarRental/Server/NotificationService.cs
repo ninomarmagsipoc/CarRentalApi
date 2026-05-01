@@ -1,16 +1,19 @@
-﻿using Microsoft.Data.SqlClient;
+﻿using CarRental.Hub;
 using CarRental.IRepository;
 using CarRental.Model;
-
+using Microsoft.AspNetCore.SignalR; 
+using Microsoft.Data.SqlClient;
 namespace CarRental.Server
 {
     public class NotificationService : INotificationRepository
     {
         private readonly string _connectionString;
+        private readonly IHubContext<NotificationHub> _hubContext; 
 
-        public NotificationService(IConfiguration configuration)
+        public NotificationService(IConfiguration configuration, IHubContext<NotificationHub> hubContext)
         {
             _connectionString = configuration.GetConnectionString("CarRental")!;
+            _hubContext = hubContext;
         }
 
         public async Task<bool> CreateNotification(int userId, int rentalId, string message)
@@ -25,7 +28,20 @@ namespace CarRental.Server
             cmd.Parameters.AddWithValue("@Message", message);
 
             await conn.OpenAsync();
-            return await cmd.ExecuteNonQueryAsync() > 0;
+            bool isSaved = await cmd.ExecuteNonQueryAsync() > 0;
+
+            if (isSaved)
+            {
+                const string countSql = "SELECT COUNT(*) FROM Notifications WHERE UserID = @UserID AND IsRead = 0";
+                using var countCmd = new SqlCommand(countSql, conn);
+                countCmd.Parameters.AddWithValue("@UserID", userId);
+
+                int unreadCount = (int)await countCmd.ExecuteScalarAsync();
+
+                await _hubContext.Clients.All.SendAsync("ReceiveNotification", unreadCount);
+            }
+
+            return isSaved;
         }
 
         public async Task<IEnumerable<Notification>> GetUserNotifications(int userId)
