@@ -173,7 +173,6 @@ namespace CarRental.Server
             {
                 await conn.OpenAsync();
 
-                // 1. I-CHECK KUNG NAA BAY ACTIVE O APPROVED NGA RENTAL KINI NGA SAKYANAN
                 string checkQuery = @"
                     SELECT COUNT(1) 
                     FROM Rentals 
@@ -186,15 +185,12 @@ namespace CarRental.Server
 
                     if (activeRentals > 0)
                     {
-                        // Kung naay nag-rent, dili nato ipadayon ang pag-hide
                         response.StatusCode = 400;
-                        response.Message = "Dili pwede i-hide kay currently 'Approved' o 'Rented' pa ang sakyanan.";
+                        response.Message = "Can't hide if you're currently 'Approved' or 'Rented' yet.";
                         return response;
                     }
                 }
 
-                // 2. I-HIDE ANG SAKYANAN IMBES NGA I-DELETE
-                // Nag-assume ta nga naa kay column nga 'IsHidden' (o 'IsDeleted') sa imong Cars table
                 string updateQuery = "UPDATE Cars SET IsHidden = 1 WHERE CarID = @CarID";
 
                 using (SqlCommand cmd = new SqlCommand(updateQuery, conn))
@@ -278,7 +274,6 @@ namespace CarRental.Server
             {
                 string imagePath = null;
 
-                // Kung naay gi-upload nga bag-ong picture, i-save
                 if (request.ImageFile != null && request.ImageFile.Length > 0)
                 {
                     string uploadFolder = Path.Combine(_env.WebRootPath, "images");
@@ -294,7 +289,6 @@ namespace CarRental.Server
 
                 await conn.OpenAsync();
 
-                // Dynamic SQL: Kung walay bag-ong image, dili i-update ang CarImage column
                 string query = @"UPDATE Cars 
                          SET CarName = @CarName, CarInfo = @CarInfo, Seats = @Seats, 
                              PricePerDay = @PricePerDay, MaintenanceMonth = @MaintenanceMonth " +
@@ -334,7 +328,6 @@ namespace CarRental.Server
             try
             {
                 await conn.OpenAsync();
-                // I-set ang IsHidden balik sa 0 aron mo-gawas pag-usab
                 string query = "UPDATE Cars SET IsHidden = 0 WHERE CarID = @CarID";
                 using (SqlCommand cmd = new SqlCommand(query, conn))
                 {
@@ -360,7 +353,6 @@ namespace CarRental.Server
             try
             {
                 await conn.OpenAsync();
-                // Mokuha lang sa mga sakyanan nga gitago (IsHidden = 1)
                 string query = "SELECT * FROM Cars WHERE IsHidden = 1";
 
                 using (SqlCommand cmd = new SqlCommand(query, conn))
@@ -377,7 +369,7 @@ namespace CarRental.Server
                             PricePerDay = Convert.ToDecimal(reader["PricePerDay"]),
                             CarImage = reader["CarImage"] == DBNull.Value ? null : reader["CarImage"].ToString(),
                             MaintenanceMonth = reader["MaintenanceMonth"] == DBNull.Value ? null : reader["MaintenanceMonth"].ToString(),
-                            IsHidden = true // Hardcoded to true kay archived list man ni
+                            IsHidden = true 
                         });
                     }
                 }

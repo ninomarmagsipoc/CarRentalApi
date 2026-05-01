@@ -183,17 +183,30 @@ namespace CarRental.Server
                     {
                         try
                         {
-                            string checkQuery = "SELECT PaymentType FROM Payment WHERE PayMongoRef = @Ref";
+                            string checkQuery = "SELECT PaymentType, PaymentStatus FROM Payment WHERE PayMongoRef = @Ref";
                             string existingType = null;
+                            string existingStatus = null;
 
                             using (var cmd = new SqlCommand(checkQuery, conn, transaction))
                             {
                                 cmd.Parameters.AddWithValue("@Ref", payMongoReference);
-                                var dbResult = await cmd.ExecuteScalarAsync();
-                                if (dbResult != null && dbResult != DBNull.Value)
+                                using (var reader = await cmd.ExecuteReaderAsync())
                                 {
-                                    existingType = dbResult.ToString();
+                                    if (await reader.ReadAsync())
+                                    {
+                                        existingType = reader["PaymentType"]?.ToString();
+                                        existingStatus = reader["PaymentStatus"]?.ToString();
+                                    }
                                 }
+                            }
+
+                            if (existingStatus == "Completed")
+                            {
+                                await transaction.RollbackAsync();
+                                response.Data = true;
+                                response.StatusCode = 200;
+                                response.Message = "Payment already processed.";
+                                return response;
                             }
 
                             if (existingType == "Partial")
@@ -211,6 +224,30 @@ namespace CarRental.Server
                                 {
                                     cmd.Parameters.AddWithValue("@RentalID", rentalId);
                                     await cmd.ExecuteNonQueryAsync();
+                                }
+
+                                int userId = 0;
+                                string userName = "A customer";
+                                string getUserQuery = "SELECT UserID, FullName FROM Rentals WHERE RentalID = @RentalID";
+
+                                using (var cmd = new SqlCommand(getUserQuery, conn, transaction))
+                                {
+                                    cmd.Parameters.AddWithValue("@RentalID", rentalId);
+                                    using (var reader = await cmd.ExecuteReaderAsync())
+                                    {
+                                        if (await reader.ReadAsync())
+                                        {
+                                            userId = reader.GetInt32(reader.GetOrdinal("UserID"));
+                                            userName = reader.GetString(reader.GetOrdinal("FullName"));
+                                        }
+                                    }
+                                }
+
+                                await _notificationRepo.CreateNotification(1, rentalId, $"New Booking Alert: {userName} paid the 50% downpayment for Rental #{rentalId}. Review needed.");
+
+                                if (userId > 0)
+                                {
+                                    await _notificationRepo.CreateNotification(userId, rentalId, $"Downpayment received for Rental #{rentalId}. Your booking is now Pending Review.");
                                 }
                             }
                             else if (existingType == "Full" || existingType == "Balance")
@@ -401,8 +438,6 @@ namespace CarRental.Server
                     return response;
                 }
 
-                // 🟢 SEND NOTIFICATION WITH THE LINK 🟢
-                // Gi-butangan nato og tag nga [PAY_ONLINE_LINK] para sayon basahon sa React
                 string notifMessage = $"Please pay your remaining balance of PHP {remainingBalance}.[PAY_ONLINE_LINK]{checkoutUrl}[REF]{reference}";
                 await _notificationRepo.CreateNotification(userId, rentalId, notifMessage);
 
@@ -457,7 +492,6 @@ namespace CarRental.Server
                     else return ErrorResponse(response, 404, "Payment record not found.");
                 }
 
-                //Get the actual "Payment ID" (pay_xxx) from the Checkout Session (cs_xxx)
                 var client = _httpClientFactory.CreateClient();
                 var authValue = Convert.ToBase64String(Encoding.ASCII.GetBytes($"{_paymongoKey}:"));
                 client.DefaultRequestHeaders.Authorization = new AuthenticationHeaderValue("Basic", authValue);
@@ -513,14 +547,12 @@ namespace CarRental.Server
                         cmd.Parameters.AddWithValue("@PID", paymentId);
                         cmd.Parameters.AddWithValue("@RID", rentalId);
 
-                        // This handles the custom text reason from your React prompt!
                         cmd.Parameters.AddWithValue("@Reason", string.IsNullOrEmpty(reason) ? "No reason provided" : reason);
 
                         await cmd.ExecuteNonQueryAsync();
 
                         string notificationMessage = "Your payment has been refunded successfully. Please rent a car again.";
 
-                        //Send Notification
                         await _notificationRepo.CreateNotification(userId, rentalId, notificationMessage);
 
                         if (!string.IsNullOrEmpty(userEmail))
@@ -588,7 +620,6 @@ namespace CarRental.Server
         {
             string status = reader["PaymentStatus"].ToString()!;
 
-            // 🟢 FIX 1: Gi-check ang RemainingBalance kung NULL ba
             decimal balance = reader["RemainingBalance"] != DBNull.Value ? Convert.ToDecimal(reader["RemainingBalance"]) : 0m;
 
             string reason = reader["RefundReason"] != DBNull.Value ? reader["RefundReason"].ToString()! : "No reason provided";
@@ -598,7 +629,6 @@ namespace CarRental.Server
                 ? $"Refunded: {reason}"
                 : $"₱ {balance:N2}";
 
-            // 🟢 FIX 2 & 3: Gi-check ang TotalAmount ug Amount kung NULL ba
             decimal originalTotal = reader["TotalAmount"] != DBNull.Value ? Convert.ToDecimal(reader["TotalAmount"]) : 0m;
             decimal paidAmount = reader["Amount"] != DBNull.Value ? Convert.ToDecimal(reader["Amount"]) : 0m;
 
@@ -610,7 +640,6 @@ namespace CarRental.Server
                 RentalID = Convert.ToInt32(reader["RentalID"]),
                 UserID = Convert.ToInt32(reader["UserID"]),
 
-                // NEW MAPPINGS (Gi-butangan pod nakog safe check for strings para sigurado)
                 UserName = reader["UserName"] != DBNull.Value ? reader["UserName"].ToString()! : "Unknown User",
                 CarName = reader["CarName"] != DBNull.Value ? reader["CarName"].ToString()! : "Unknown Car",
                 FullName = reader["FullName"] != DBNull.Value ? reader["FullName"].ToString()! : "Unknown Full Name",
@@ -785,15 +814,13 @@ namespace CarRental.Server
                     int userId = paymentsToRefund.First().UserId;
                     decimal totalRefunded = 0;
 
-                    //Loop through each payment and refund 90%
                     foreach (var payment in paymentsToRefund)
                     {
-                        decimal refundAmount = payment.Amount * 0.75m; // 90% Refund Rule
+                        decimal refundAmount = payment.Amount * 0.75m; 
                         totalRefunded += refundAmount;
 
-                        // Grab actual pay_xxx ID from cs_xxx
                         var sessionRes = await client.GetAsync($"https://api.paymongo.com/v1/checkout_sessions/{payment.Ref}");
-                        if (!sessionRes.IsSuccessStatusCode) continue; // Skip if PayMongo lookup fails
+                        if (!sessionRes.IsSuccessStatusCode) continue; 
 
                         using var sessionDoc = JsonDocument.Parse(await sessionRes.Content.ReadAsStringAsync());
                         var paymentsArray = sessionDoc.RootElement.GetProperty("data").GetProperty("attributes").GetProperty("payments");
@@ -801,14 +828,13 @@ namespace CarRental.Server
 
                         string actualPaymentId = paymentsArray[0].GetProperty("id").GetString();
 
-                        // Hit PayMongo Refund API
                         var refundPayload = new
                         {
                             data = new
                             {
                                 attributes = new
                                 {
-                                    amount = (int)(refundAmount * 100), // Convert to cents
+                                    amount = (int)(refundAmount * 100), 
                                     payment_id = actualPaymentId,
                                     reason = "requested_by_customer"
                                 }
@@ -867,13 +893,12 @@ namespace CarRental.Server
             try
             {
                 int userId = 0;
-                decimal balanceToPay = 0; // 🟢 Maghimo tag variable para sa computed balance
+                decimal balanceToPay = 0; 
 
                 using (var conn = new SqlConnection(_connectionString))
                 {
                     await conn.OpenAsync();
 
-                    // 1. Kuhaon ang UserID ug ang TotalPrice sa Rental
                     decimal totalPrice = 0;
                     using (var userCmd = new SqlCommand("SELECT UserID, TotalPrice FROM Rentals WHERE RentalID = @RentalID", conn))
                     {
@@ -895,7 +920,6 @@ namespace CarRental.Server
                         }
                     }
 
-                    // 2. Kuhaon ang total nga nabayad na daan (e.g., Downpayment) para ani nga Rental
                     decimal totalPaid = 0;
                     using (var paidCmd = new SqlCommand("SELECT ISNULL(SUM(Amount), 0) FROM Payment WHERE RentalID = @RentalID AND PaymentStatus = 'Completed'", conn))
                     {
@@ -903,10 +927,8 @@ namespace CarRental.Server
                         totalPaid = Convert.ToDecimal(await paidCmd.ExecuteScalarAsync());
                     }
 
-                    // 3. I-compute ang Remaining Balance (TotalPrice - TotalPaid)
                     balanceToPay = totalPrice - totalPaid;
 
-                    // 🟢 I-check kung fully paid na ba daan aron dili mag-doble
                     if (balanceToPay <= 0)
                     {
                         response.StatusCode = 400;
@@ -915,7 +937,6 @@ namespace CarRental.Server
                         return response;
                     }
 
-                    // 4. I-insert ang Payment gamit ang NA-COMPUTE nga balance (imposible na masayop ang admin)
                     string insertQuery = @"INSERT INTO Payment (RentalID, UserID, PaymentMethod, PaymentType, PaymentStatus, Amount, CreatedAt)
                                    VALUES (@RentalID, @UserID, 'Cash', 'Full', 'Completed', @Amount, GETDATE())";
 
@@ -923,22 +944,19 @@ namespace CarRental.Server
                     {
                         cmd.Parameters.AddWithValue("@RentalID", request.RentalId);
                         cmd.Parameters.AddWithValue("@UserID", userId);
-                        cmd.Parameters.AddWithValue("@Amount", balanceToPay); // 🟢 Computed balance ang atong i-save!
+                        cmd.Parameters.AddWithValue("@Amount", balanceToPay); 
                         await cmd.ExecuteNonQueryAsync();
                     }
 
-                    // 5. I-update ang Rental Status (Himuon natong 'Rented')
                     using (var updateCmd = new SqlCommand("UPDATE Rentals SET Status = 'Rented' WHERE RentalID = @RentalID", conn))
                     {
                         updateCmd.Parameters.AddWithValue("@RentalID", request.RentalId);
                         await updateCmd.ExecuteNonQueryAsync();
                     }
 
-                    // I-close ang connection dinhi dapita aron limpyo
                     await conn.CloseAsync();
                 }
 
-                // 6. Mag-send og Success Notification gamit ang saktong balance
                 string notifMessage = $"Success! We have received your Cash payment of PHP {balanceToPay} for your remaining balance.";
                 await _notificationRepo.CreateNotification(userId, request.RentalId, notifMessage);
 

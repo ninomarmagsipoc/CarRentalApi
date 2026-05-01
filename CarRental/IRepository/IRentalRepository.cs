@@ -14,7 +14,7 @@ namespace CarRental.IRepository
         Task<ServiceResponse<object>> ReturnCar(int rentalId);
 
         Task<ServiceResponse<bool>> RequestCancellation(int rentalId, int userId);
-        Task<ServiceResponse<bool>> ReviewCancellation(int rentalId, string action); // action: "Approved" or "Rejected ADMIN"
+        Task<ServiceResponse<bool>> ReviewCancellation(int rentalId, string action); 
         Task<ServiceResponse<List<Rental>>> GetRentalsByUserId(int userId);
 
         Task<ServiceResponse<bool>> UpdateRentalStatus(int rentalId, string newStatus);
@@ -24,6 +24,8 @@ namespace CarRental.IRepository
         Task<ServiceResponse<List<BookedDateDto>>> GetBookedDatesForCar(int carId);
 
         Task<ServiceResponse<bool>> MoveToTrash(int rentalId);
-
+        Task<ServiceResponse<bool>> ArchiveRental(int rentalId);
+        Task<ServiceResponse<bool>> HideRentalPermanently(int rentalId);
+        Task<ServiceResponse<bool>> RestoreRental(int rentalId);
     }
 }

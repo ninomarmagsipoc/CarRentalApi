@@ -28,7 +28,6 @@ namespace CarRental.Server.Controllers
                 {
                     await conn.OpenAsync();
 
-                    // 1. TOP STATS (Gi-apil na ang TotalCars dinhi)
                     string statsQuery = @"
                         SELECT 
                             (SELECT ISNULL(SUM(
@@ -58,7 +57,7 @@ namespace CarRental.Server.Controllers
                         }
                     }
 
-                    // 2. MONTHLY REVENUE 
+                   
                     string monthlyQuery = @"
                         SELECT DATENAME(month, CreatedAt) AS MonthName, 
                                ISNULL(SUM(
@@ -88,7 +87,7 @@ namespace CarRental.Server.Controllers
                         }
                     }
 
-                    // 3. DAILY REVENUE 
+                    
                     string dailyQuery = @"
                         SELECT DATENAME(weekday, CreatedAt) AS DayName, 
                                ISNULL(SUM(
@@ -118,7 +117,7 @@ namespace CarRental.Server.Controllers
                         }
                     }
 
-                    // 4. MOST POPULAR CARS
+                   
                     string popularQuery = @"
                         SELECT TOP 5 c.CarName, COUNT(r.RentalID) AS RentCount
                         FROM Rentals r

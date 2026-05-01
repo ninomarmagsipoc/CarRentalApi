@@ -28,18 +28,17 @@ namespace CarRental.Server
         {
             using var conn = new SqlConnection(_connectionString);
 
-            // Delete payments first to prevent Foreign Key errors, then delete the rental
             const string query = @"
                 -- Step 1: Delete associated abandoned payments
                 DELETE FROM Payment 
                 WHERE RentalID IN (
                     SELECT RentalID FROM Rentals 
-                    WHERE Status = 'Pending' AND CreatedAt < DATEADD(MINUTE, -5, GETDATE())
+                    WHERE Status = 'Pending' AND CreatedAt < DATEADD(MINUTE, -1, GETDATE())
                 );
 
                 -- Step 2: Delete the abandoned rental records
                 DELETE FROM Rentals 
-                WHERE Status = 'Pending' AND CreatedAt < DATEADD(MINUTE, -5, GETDATE());
+                WHERE Status = 'Pending' AND CreatedAt < DATEADD(MINUTE, -1, GETDATE());
             ";
 
             await conn.OpenAsync();
@@ -48,7 +47,7 @@ namespace CarRental.Server
 
             if (affected > 0)
             {
-                //affected counts rows deleted from both tables
+                
                 Console.WriteLine($"Automatically deleted abandoned initial checkouts (5-minute rule).");
             }
         }
@@ -56,14 +55,14 @@ namespace CarRental.Server
         private async Task RejectExpiredRentals()
         {
             using var scope = _serviceProvider.CreateScope();
-            // Resolve the services needed for the automated refund
+          
             var paymentRepo = scope.ServiceProvider.GetRequiredService<IPaymentRepository>();
             var notificationRepo = scope.ServiceProvider.GetRequiredService<INotificationRepository>();
 
             using var conn = new SqlConnection(_connectionString);
             await conn.OpenAsync();
 
-            //Identify rentals that are Approved but haven't paid the 'Full' balance within 30 mins
+           
             const string selectQuery = @"
             SELECT p.PaymentID, r.RentalID, r.UserID 
             FROM Rentals r
@@ -91,7 +90,6 @@ namespace CarRental.Server
             {
                 try
                 {
-                    // This handles the PayMongo API call and updates DB status to 'Refunded'
                     var refundResult = await paymentRepo.RefundPayment(item.PaymentId);
 
                     if (refundResult.StatusCode == 200)
@@ -103,7 +101,7 @@ namespace CarRental.Server
                             await updateCmd.ExecuteNonQueryAsync();
                         }
 
-                        //Send a specific "Automatic Refund" notification
+                       
                         await notificationRepo.CreateNotification(item.UserId, item.RentalId,
                             "Your rental timed out. Your downpayment has been automatically refunded.");
 
@@ -111,7 +109,6 @@ namespace CarRental.Server
                     }
                     else
                     {
-                        // If PayMongo fails (e.g., sk_test issues), log it for manual admin intervention
                         Console.WriteLine($"[AUTO-REFUND-ERROR] Failed to refund Rental #{item.RentalId}: {refundResult.Message}");
                     }
                 }

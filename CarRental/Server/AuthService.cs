@@ -527,7 +527,6 @@ namespace CarRental.Server
                     return response;
                 }
 
-                // ✅ Validate file type
                 var allowedTypes = new[] { "image/jpeg", "image/png", "image/jpg" };
                 if (!allowedTypes.Contains(request.File.ContentType))
                 {
@@ -536,18 +535,15 @@ namespace CarRental.Server
                     return response;
                 }
 
-                // ✅ Create uploads folder if not exists
                 var uploadPath = Path.Combine(_env.WebRootPath, "upload");
                 if (!Directory.Exists(uploadPath))
                 {
                     Directory.CreateDirectory(uploadPath);
                 }
 
-                // ✅ Generate filename
                 var fileName = $"{Guid.NewGuid()}_{request.File.FileName}";
                 var filePath = Path.Combine(uploadPath, fileName);
 
-                // ✅ Save file
                 using (var stream = new FileStream(filePath, FileMode.Create))
                 {
                     await request.File.CopyToAsync(stream);
@@ -592,9 +588,8 @@ namespace CarRental.Server
             {
                 await conn.OpenAsync();
 
-                // 1. I-verify ang OTP ug Kuhaon ang PasswordHash dungan
                 string verifyQuery = @"SELECT VerificationCode, VerificationExpiry, PasswordHash FROM Users WHERE Email = @Email";
-                string storedHash = ""; // Diri nato i-save ang current password sa database
+                string storedHash = "";
 
                 using (SqlCommand cmd = new SqlCommand(verifyQuery, conn))
                 {
@@ -608,7 +603,7 @@ namespace CarRental.Server
 
                         string storedCode = reader["VerificationCode"]?.ToString();
                         DateTime expiry = reader["VerificationExpiry"] == DBNull.Value ? DateTime.MinValue : (DateTime)reader["VerificationExpiry"];
-                        storedHash = reader["PasswordHash"]?.ToString(); // Kuhaon nato ang hash
+                        storedHash = reader["PasswordHash"]?.ToString(); 
 
                         if (storedCode != request.OtpCode)
                         {
@@ -638,22 +633,18 @@ namespace CarRental.Server
                         updateCmd.Parameters.AddWithValue("@LN", request.LastName);
                     }
 
-                    // 2. SECURITY CHECK PARA SA PASSWORD
                     if (!string.IsNullOrWhiteSpace(request.NewPassword))
                     {
-                        // Kung walay gibutang nga current password ang user
                         if (string.IsNullOrWhiteSpace(request.CurrentPassword))
                         {
                             response.StatusCode = 400; response.Message = "Please enter your current password to set a new one."; return response;
                         }
 
-                        // I-verify kung nag-match ba ang gitype nga current password vs sa database
                         if (!BCrypt.Net.BCrypt.Verify(request.CurrentPassword, storedHash))
                         {
                             response.StatusCode = 400; response.Message = "Incorrect current password. Cannot change password."; return response;
                         }
 
-                        // Kung sakto, i-hash ang bag-ong password
                         updateClauses.Add("PasswordHash = @Hash");
                         updateCmd.Parameters.AddWithValue("@Hash", BCrypt.Net.BCrypt.HashPassword(request.NewPassword));
                     }
@@ -663,7 +654,6 @@ namespace CarRental.Server
                         response.StatusCode = 400; response.Message = "No changes requested."; return response;
                     }
 
-                    // I-clear ang OTP kay nagamit na
                     updateClauses.Add("VerificationCode = NULL");
                     updateClauses.Add("VerificationExpiry = NULL");
 

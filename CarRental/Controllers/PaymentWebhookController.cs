@@ -1,6 +1,6 @@
 ﻿using Microsoft.AspNetCore.Mvc;
 using System.Text.Json;
-using CarRental.IRepository; // 🟢 Injected your repository
+using CarRental.IRepository; 
 
 namespace CarRental.Controllers
 {
@@ -31,10 +31,9 @@ namespace CarRental.Controllers
                     .GetProperty("type")
                     .GetString();
 
-                // 🟢 Listen specifically for Checkout Sessions
                 if (eventType == "checkout_session.payment.paid")
                 {
-                    // Grab the 'cs_xxxxxx' ID
+                   
                     var reference = json.RootElement
                         .GetProperty("data")
                         .GetProperty("attributes")
@@ -48,7 +47,6 @@ namespace CarRental.Controllers
                     }
                 }
 
-                // Always return 200 OK so PayMongo knows you received it safely
                 return Ok();
             }
             catch (Exception ex)
