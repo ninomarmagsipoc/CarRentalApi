@@ -20,5 +20,9 @@ namespace CarRental.IRepository
 
         //Update Photo
         Task<ServiceResponse<UploadProfileResponse>> UploadProfile(UploadProfileRequest request);
+        Task<ServiceResponse<object>> UpdateProfile(UpdateProfileRequest request);
+        Task<ServiceResponse<List<CustomerDto>>> GetAllCustomers();
+        Task<ServiceResponse<string>> ToggleBlockUser(int userId, bool isBlocked);
+        Task<ServiceResponse<List<CustomerRentalHistoryDto>>> GetCustomerRentalHistory(int userId);
     }
 }

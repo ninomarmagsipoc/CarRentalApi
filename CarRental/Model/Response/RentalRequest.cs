@@ -1,4 +1,5 @@
-﻿namespace CarRental.Model.Response
+﻿using Microsoft.AspNetCore.Http;
+namespace CarRental.Model.Response
 {
     public class RentalRequest
     {
@@ -11,5 +12,6 @@
         public string FullName { get; set; }
         public string ContactNumber { get; set; }
         public string PickupLocation { get; set; }
+        public IFormFile? DriverLicense { get; set; }
     }
 }

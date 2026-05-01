@@ -21,6 +21,9 @@ namespace CarRental.IRepository
 
         Task<ServiceResponse<bool>> RequestReturn(int rentalId);
         Task<ServiceResponse<object>> ReviewReturnRequest(int rentalId, string action, string reason);
+        Task<ServiceResponse<List<BookedDateDto>>> GetBookedDatesForCar(int carId);
+
+        Task<ServiceResponse<bool>> MoveToTrash(int rentalId);
 
     }
 }

@@ -16,28 +16,28 @@ namespace CarRental.Controllers
             _rental = rental;
         }
 
-            [HttpPost("create")]
-            public async Task<IActionResult> CreateRental([FromBody] RentalRequest request)
-            {
-                var result = await _rental.CreateRental(request);
-                return StatusCode(result.StatusCode, result);
-            }
+        [HttpPost("create")]
+        public async Task<IActionResult> CreateRental([FromForm] RentalRequest request)
+        {
+            var result = await _rental.CreateRental(request);
+            return StatusCode(result.StatusCode, result);
+        }
 
-            [HttpGet]
-            public async Task<IActionResult> GetAll()
-            {
-                var result = await _rental.GetRentals();
-                return Ok(result);
-            }
+        [HttpGet]
+        public async Task<IActionResult> GetAll()
+        {
+            var result = await _rental.GetRentals();
+            return Ok(result);
+        }
 
-            [HttpGet("{id}")]
-            public async Task<IActionResult> GetById(int id)
-            {
-                var result = await _rental.GetRentalById(id);
-                return StatusCode(result.StatusCode, result);
+        [HttpGet("{id}")]
+        public async Task<IActionResult> GetById(int id)
+        {
+            var result = await _rental.GetRentalById(id);
+            return StatusCode(result.StatusCode, result);
 
 
-            }
+        }
 
         [HttpPut("admin/rentals/{rentalId}/review")]
         public async Task<IActionResult> ReviewBooking(int rentalId, [FromBody] ReviewBookingDto request)
@@ -114,6 +114,28 @@ namespace CarRental.Controllers
             var result = await _rental.ReviewReturnRequest(rentalId, request.Action, request.Reason);
             if (result.StatusCode == 200) return Ok(result);
             return StatusCode(result.StatusCode, result);
+        }
+
+        [HttpGet("car/{carId}/booked-dates")]
+        public async Task<IActionResult> GetBookedDatesForCar(int carId)
+        {
+            // Tawgon nato ang Service nga atong gibuhat
+            var response = await _rental.GetBookedDatesForCar(carId);
+
+            if (response.StatusCode == 200)
+            {
+                // I-return ra ang .Data aron direkta nga array ang makuha sa imong React frontend
+                return Ok(response.Data);
+            }
+
+            return StatusCode(response.StatusCode, response.Message);
+        }
+
+        [HttpDelete("trash/{rentalId}")]
+        public async Task<IActionResult> MoveToTrash(int rentalId)
+        {
+            var response = await _rental.MoveToTrash(rentalId);
+            return StatusCode(response.StatusCode, response);
         }
     }
 }

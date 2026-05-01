@@ -14,6 +14,7 @@
         public int UserID { get; set; }
 
         public string UserName { get; set; } = string.Empty;
+        public string FullName { get; set; } = string.Empty;
         public string CarName { get; set; } = string.Empty;
         public decimal TotalAmount { get; set; }
 

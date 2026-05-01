@@ -50,5 +50,22 @@ namespace CarRental.Controllers
                 Data = result
             });
         }
+
+        [HttpGet("unread-count/{userId}")]
+        public async Task<IActionResult> GetUnreadCount(int userId)
+        {
+            try
+            {
+                var notifications = await _notificationService.GetUserNotifications(userId);
+
+                int unreadCount = notifications.Count(n => n.IsRead == false);
+
+                return Ok(unreadCount);
+            }
+            catch (Exception ex)
+            {
+                return StatusCode(500, ex.Message);
+            }
+        }
     }
 }

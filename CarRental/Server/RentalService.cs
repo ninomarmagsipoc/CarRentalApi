@@ -2,6 +2,9 @@
 using CarRental.Model;
 using CarRental.Model.Response;
 using System.Data.SqlClient;
+using Microsoft.AspNetCore.Hosting;
+using Microsoft.AspNetCore.Http;
+using System.IO;
 
 namespace CarRental.Server
 {
@@ -11,13 +14,15 @@ namespace CarRental.Server
         private readonly INotificationRepository _notificationRepo;
         private readonly IEmailService _emailService;
         private readonly IPaymentRepository _paymentRepo;
+        private readonly IWebHostEnvironment _env;
 
-        public RentalService(IConfiguration config, INotificationRepository notificationRepo, IPaymentRepository paymentRepo, IEmailService emailService)
+        public RentalService(IConfiguration config, INotificationRepository notificationRepo, IPaymentRepository paymentRepo, IEmailService emailService, IWebHostEnvironment env)
         {
             conn = new SqlConnection(config["ConnectionStrings:CarRental"]);
             _notificationRepo = notificationRepo;
             _emailService = emailService;
             _paymentRepo = paymentRepo;
+            _env = env;
         }
 
         public async Task<ServiceResponse<Rental>> CreateRental(RentalRequest request)
@@ -28,6 +33,7 @@ namespace CarRental.Server
             {
                 DateTime today = DateTime.Today;
 
+                // 1. I-balhin nato ang Date Validation sa pinakataas aron dili na siya mo-open sa database kung sayop daan ang date
                 if (request.StartDate.Date < today)
                 {
                     response.StatusCode = 400;
@@ -42,19 +48,49 @@ namespace CarRental.Server
                     return response;
                 }
 
-                await conn.OpenAsync();
+                // 🟢 2. I-OPEN ANG CONNECTION KA-USA RA GYUD
+                if (conn.State == System.Data.ConnectionState.Closed)
+                {
+                    await conn.OpenAsync();
+                }
 
+                // 🟢 3. I-CHECK KUNG UNDER MAINTENANCE BA ANG SAKYANAN
+                string maintQuery = "SELECT MaintenanceMonth FROM Cars WHERE CarID = @CarID";
+                using (var cmd = new SqlCommand(maintQuery, conn))
+                {
+                    cmd.Parameters.AddWithValue("@CarID", request.CarID);
+                    var maintObj = await cmd.ExecuteScalarAsync();
+
+                    if (maintObj != null && maintObj != DBNull.Value)
+                    {
+                        string maintMonth = maintObj.ToString().Trim().ToLower();
+
+                        // Kuhaon ang Month ug Year sa gi-request nga date (e.g. "october 2026")
+                        string reqStartMonth = request.StartDate.ToString("MMMM yyyy", new System.Globalization.CultureInfo("en-US")).ToLower();
+                        string reqEndMonth = request.EndDate.ToString("MMMM yyyy", new System.Globalization.CultureInfo("en-US")).ToLower();
+
+                        // Kung ang Start Date o End Date naigo sa Maintenance Month, I-REJECT!
+                        if (maintMonth == reqStartMonth || maintMonth == reqEndMonth)
+                        {
+                            response.StatusCode = 400;
+                            response.Message = $"Cannot be booked. The vehicle is under maintenance for the entire month of {maintObj.ToString()}.";
+                            return response;
+                        }
+                    }
+                }
+
+                // ❌ GITANGTANG NATO ANG IKADUHANG conn.OpenAsync() DINHI KAY OPEN NA SIYA SA TAAS
+
+                // 🟢 4. I-CHECK ANG OVERLAPPING DATES
                 string checkQuery = @"
-                    SELECT COUNT(*) FROM Rentals 
-                    WHERE CarID = @CarID 
-                    AND Status NOT IN ('Cancelled', 'Returned', 'Rejected') 
-                    AND (
-                        -- Kini mag-check kung ang bag-ong booking (request) nasulod ba sa 
-                        -- Expanded Range (DB Date +/- 3 days buffer)
-                        DATEADD(day, -3, StartDate) <= @EndDate 
-                        AND 
-                        DATEADD(day, 3, EndDate) >= @StartDate
-                    )";
+            SELECT COUNT(*) FROM Rentals 
+            WHERE CarID = @CarID 
+            AND Status NOT IN ('Cancelled', 'Returned', 'Rejected') 
+            AND (
+                DATEADD(day, -3, StartDate) <= @EndDate 
+                AND 
+                DATEADD(day, 3, EndDate) >= @StartDate
+            )";
 
                 using (SqlCommand checkCmd = new SqlCommand(checkQuery, conn))
                 {
@@ -72,6 +108,7 @@ namespace CarRental.Server
                     }
                 }
 
+                // 🟢 5. KUHAON ANG PRICE PER DAY
                 decimal pricepPerDay = 0;
                 string priceQuery = "SELECT PricePerDay FROM Cars WHERE CarID = @CarID";
 
@@ -80,7 +117,7 @@ namespace CarRental.Server
                     cmd.Parameters.AddWithValue("@CarID", request.CarID);
                     var result = await cmd.ExecuteScalarAsync();
 
-                    if(result == null)
+                    if (result == null)
                     {
                         response.StatusCode = 404;
                         response.Message = "Car Not Found";
@@ -90,8 +127,8 @@ namespace CarRental.Server
                     pricepPerDay = Convert.ToDecimal(result);
                 }
 
+                // 🟢 6. COMPUTE TOTAL DAYS & PRICE
                 int totalDays = (request.EndDate - request.StartDate).Days;
-
                 if (totalDays <= 0)
                 {
                     totalDays = 1;
@@ -99,9 +136,26 @@ namespace CarRental.Server
 
                 decimal totalPrice = totalDays * pricepPerDay;
 
-                string insertQuery = @"INSERT INTO Rentals (UserID, CarID, StartDate, EndDate, TotalPrice, FullName, ContactNumber, PickupLocation)
-                                     OUTPUT INSERTED.*
-                                     VALUES (@UserID, @CarID, @StartDate, @EndDate, @TotalPrice, @FullName, @ContactNumber, @PickupLocation)";
+                // 🟢 7. UPLOAD LICENSE IMAGE
+                string licenseFileName = null;
+                if (request.DriverLicense != null)
+                {
+                    var uploadsFolder = Path.Combine(_env.WebRootPath, "uploads", "licenses");
+                    if (!Directory.Exists(uploadsFolder)) Directory.CreateDirectory(uploadsFolder);
+
+                    licenseFileName = Guid.NewGuid().ToString() + "_" + request.DriverLicense.FileName;
+                    var filePath = Path.Combine(uploadsFolder, licenseFileName);
+
+                    using (var stream = new FileStream(filePath, FileMode.Create))
+                    {
+                        await request.DriverLicense.CopyToAsync(stream);
+                    }
+                }
+
+                // 🟢 8. INSERT SA DATABASE
+                string insertQuery = @"
+            INSERT INTO Rentals (UserID, CarID, StartDate, EndDate, TotalPrice, FullName, ContactNumber, PickupLocation, DriverLicense, Status) 
+            OUTPUT INSERTED.* VALUES (@UserId, @CarId, @StartDate, @EndDate, @TotalPrice, @FullName, @ContactNumber, @PickupLocation, @DriverLicense, 'Pending')";
 
                 using (SqlCommand cmd = new SqlCommand(insertQuery, conn))
                 {
@@ -114,10 +168,11 @@ namespace CarRental.Server
                     cmd.Parameters.AddWithValue("@FullName", (object)request.FullName ?? DBNull.Value);
                     cmd.Parameters.AddWithValue("@ContactNumber", (object)request.ContactNumber ?? DBNull.Value);
                     cmd.Parameters.AddWithValue("@PickupLocation", (object)request.PickupLocation ?? DBNull.Value);
+                    cmd.Parameters.AddWithValue("@DriverLicense", (object)licenseFileName ?? DBNull.Value);
 
                     using (SqlDataReader reader = await cmd.ExecuteReaderAsync())
                     {
-                        if(await reader.ReadAsync())
+                        if (await reader.ReadAsync())
                         {
                             response.Data = new Rental
                             {
@@ -126,26 +181,35 @@ namespace CarRental.Server
                                 CarID = Convert.ToInt32(reader["CarID"]),
                                 StartDate = Convert.ToDateTime(reader["StartDate"]),
                                 EndDate = Convert.ToDateTime(reader["EndDate"]),
-                                TotalDays = Convert.ToInt32(reader["TotalDays"]),
+                                TotalDays = Convert.ToInt32(reader["TotalDays"] != DBNull.Value ? reader["TotalDays"] : totalDays),
                                 TotalPrice = Convert.ToDecimal(reader["TotalPrice"]),
                                 Status = reader["Status"].ToString(),
                                 FullName = reader["FullName"]?.ToString(),
                                 ContactNumber = reader["ContactNumber"]?.ToString(),
                                 PickupLocation = reader["PickupLocation"]?.ToString(),
+                                DriverLicense = reader["DriverLicense"]?.ToString(),
                                 CreatedAt = Convert.ToDateTime(reader["CreatedAt"]),
                                 UpdatedAt = Convert.ToDateTime(reader["UpdatedAt"])
                             };
 
+                            response.StatusCode = 200;
                             response.Message = "Rental Created SuccessFully";
                         }
                     }
                 }
-
             }
-            catch(Exception ex) 
+            catch (Exception ex)
             {
                 response.StatusCode = 500;
                 response.Message = ex.Message;
+            }
+            finally
+            {
+                // 🟢 KINI IMPORTANTE KAAYO: I-CLOSE PIRME ANG CONNECTION INIG HUMAN
+                if (conn.State == System.Data.ConnectionState.Open)
+                {
+                    await conn.CloseAsync();
+                }
             }
 
             return response;
@@ -159,13 +223,16 @@ namespace CarRental.Server
             await conn.OpenAsync();
 
             string query = @"
-            SELECT r.*, 
-                   CONCAT(u.FirstName, ' ', u.LastName) AS UserName,
-                   (SELECT TOP 1 PaymentID FROM Payment p WHERE p.RentalID = r.RentalID ORDER BY p.CreatedAt DESC) AS PaymentID
-            FROM Rentals r
-            LEFT JOIN Users u ON r.UserID = u.Id
-            WHERE r.Status != 'Pending'
-            ORDER BY r.CreatedAt DESC";
+                 SELECT r.*, 
+                        CONCAT(u.FirstName, ' ', u.LastName) AS UserName,
+                        c.CarName as CarName,
+                        r.DriverLicense,
+                        (SELECT TOP 1 PaymentID FROM Payment p WHERE p.RentalID = r.RentalID ORDER BY p.CreatedAt DESC) AS PaymentID     
+                 FROM Rentals r     
+                 LEFT JOIN Users u ON r.UserID = u.Id
+                 LEFT JOIN Cars c ON r.CarID = c.CarID
+                 WHERE r.Status != 'Pending'     
+                 ORDER BY r.CreatedAt DESC";
 
             using (SqlCommand cmd = new SqlCommand(query, conn))
             using (SqlDataReader reader = await cmd.ExecuteReaderAsync())
@@ -177,6 +244,7 @@ namespace CarRental.Server
                         RentalID = Convert.ToInt32(reader["RentalID"]),
                         UserID = Convert.ToInt32(reader["UserID"]),
                         UserName = reader["UserName"] != DBNull.Value ? reader["UserName"].ToString() : "Unknown User",
+                        CarName = reader["CarName"] != DBNull.Value ? reader["CarName"].ToString() : "Unknown CarName",
                         CarID = Convert.ToInt32(reader["CarID"]),
                         StartDate = Convert.ToDateTime(reader["StartDate"]),
                         EndDate = Convert.ToDateTime(reader["EndDate"]),
@@ -186,9 +254,9 @@ namespace CarRental.Server
                         FullName = reader["FullName"] != DBNull.Value ? reader["FullName"].ToString() : null,
                         ContactNumber = reader["ContactNumber"] != DBNull.Value ? reader["ContactNumber"].ToString() : null,
                         PickupLocation = reader["PickupLocation"] != DBNull.Value ? reader["PickupLocation"].ToString() : null,
+                        DriverLicense = reader["DriverLicense"]?.ToString(),
                         CreatedAt = Convert.ToDateTime(reader["CreatedAt"]),
                         UpdatedAt = reader["UpdatedAt"] != DBNull.Value ? Convert.ToDateTime(reader["UpdatedAt"]) : DateTime.MinValue,
-
                         PaymentID = reader["PaymentID"] != DBNull.Value ? Convert.ToInt32(reader["PaymentID"]) : (int?)null,
                     });
                 }
@@ -203,7 +271,23 @@ namespace CarRental.Server
 
             await conn.OpenAsync();
 
-            string query = "SELECT * FROM Rentals WHERE RentalID = @Id";
+            string query = @"
+             SELECT r.*, 
+               CONCAT(u.FirstName, ' ', u.LastName) AS UserName,
+               c.CarName, 
+               p.PaymentID,
+               p.Amount,
+               p.PayMongoRef
+            FROM Rentals r
+            LEFT JOIN Users u ON r.UserID = u.Id
+            LEFT JOIN Cars c ON r.CarID = c.CarID
+            OUTER APPLY (
+                SELECT TOP 1 PaymentID, Amount, PayMongoRef 
+                FROM Payment 
+                WHERE RentalID = r.RentalID 
+                ORDER BY CreatedAt DESC
+            ) p
+            WHERE r.RentalID = @Id";
 
             using (SqlCommand cmd = new SqlCommand(query, conn))
             {
@@ -219,6 +303,7 @@ namespace CarRental.Server
                             RentalID = Convert.ToInt32(reader["RentalID"]),
                             UserID = Convert.ToInt32(reader["UserID"]),
                             CarID = Convert.ToInt32(reader["CarID"]),
+                            CarName = reader["CarName"] != DBNull.Value ? reader["CarName"].ToString() : null,
                             StartDate = Convert.ToDateTime(reader["StartDate"]),
                             EndDate = Convert.ToDateTime(reader["EndDate"]),
                             TotalDays = Convert.ToInt32(reader["TotalDays"]),
@@ -227,8 +312,11 @@ namespace CarRental.Server
                             FullName = reader["FullName"] != DBNull.Value ? reader["FullName"].ToString() : null,
                             ContactNumber = reader["ContactNumber"] != DBNull.Value ? reader["ContactNumber"].ToString() : null,
                             PickupLocation = reader["PickupLocation"] != DBNull.Value ? reader["PickupLocation"].ToString() : null,
+                            DriverLicense = reader["DriverLicense"]?.ToString(),
                             CreatedAt = Convert.ToDateTime(reader["CreatedAt"]),
                             UpdatedAt = Convert.ToDateTime(reader["UpdatedAt"]),
+                            Amount = reader["Amount"] != DBNull.Value ? Convert.ToDecimal(reader["Amount"]) : 0,
+                            PaymentReference = reader["PayMongoRef"] != DBNull.Value ? reader["PayMongoRef"].ToString() : "N/A"
                         };
                     }
 
@@ -254,10 +342,10 @@ namespace CarRental.Server
                 }
 
                 string query = @"    
-            UPDATE Rentals 
-            SET Status = @Status, UpdatedAt = GETDATE()    
-            OUTPUT INSERTED.UserID    
-            WHERE RentalID = @RentalID";
+                    UPDATE Rentals 
+                    SET Status = @Status, UpdatedAt = GETDATE()    
+                    OUTPUT INSERTED.UserID    
+                    WHERE RentalID = @RentalID";
 
                 int? userId = null;
                 using (SqlCommand cmd = new SqlCommand(query, conn))
@@ -306,7 +394,7 @@ namespace CarRental.Server
                             }
                         }
 
-                        notificationMessage = $"Your rental has been approved. Please pay the remaining balance of PHP {remainingBalance:N2}. Please Go to our Website to Pay it";
+                        notificationMessage = $"Your rental is approved! Please print this Agreement Paper and present it upon pick-up.";
 
                         emailSubject = "Rental Approved - Action Required"; 
                     }
@@ -372,7 +460,7 @@ namespace CarRental.Server
                     SELECT r.RentalID, r.UserID, u.Email 
                     FROM Rentals r 
                     INNER JOIN Users u ON r.UserID = u.Id 
-                    WHERE r.Status = 'Delivered' AND r.EndDate < GETDATE()";
+                    WHERE r.Status = 'Rented' AND r.EndDate < GETDATE()";
 
                 var overdueRentals = new List<(int RentalId, int UserId, string Email)>();
 
@@ -430,10 +518,7 @@ namespace CarRental.Server
             var response = new ServiceResponse<object>();
             try
             {
-                if (conn.State != System.Data.ConnectionState.Open)
-                {
-                    await conn.OpenAsync();
-                }
+                if (conn.State != System.Data.ConnectionState.Open) await conn.OpenAsync();
 
                 DateTime endDate = DateTime.MinValue;
                 string status = "";
@@ -441,7 +526,7 @@ namespace CarRental.Server
                 string userEmail = "";
                 decimal pricePerDay = 0;
 
-                // 1. Get Rental details
+                //Get Rental details
                 const string rentalQuery = @"
                     SELECT r.EndDate, r.Status, r.UserID, u.Email, c.PricePerDay
                     FROM Rentals r 
@@ -461,43 +546,34 @@ namespace CarRental.Server
                         userEmail = reader["Email"].ToString();
                         pricePerDay = Convert.ToDecimal(reader["PricePerDay"]);
                     }
-                    else
-                    {
-                        response.StatusCode = 404; response.Message = "Rental not found."; return response;
-                    }
+                    else { response.StatusCode = 404; response.Message = "Rental not found."; return response; }
                 }
 
-                if (status == "Returned")
-                {
-                    response.StatusCode = 400; response.Message = "Car is already returned."; return response;
-                }
+                if (status == "Returned") { response.StatusCode = 400; response.Message = "Car is already returned."; return response; }
 
                 //Calculate Penalty
                 int overdueDays = (DateTime.Now.Date - endDate.Date).Days;
                 decimal penaltyFee = overdueDays > 0 ? overdueDays * pricePerDay : 0;
-                string checkoutUrl = null;
+
+                string newStatus = penaltyFee > 0 ? "Pending Penalty" : "Returned";
 
                 //Update DB
-                const string updateQuery = "UPDATE Rentals SET Status = 'Returned', PenaltyFee = @PenaltyFee, UpdatedAt = GETDATE() WHERE RentalID = @RentalID";
+                const string updateQuery = "UPDATE Rentals SET Status = @Status, PenaltyFee = @PenaltyFee, UpdatedAt = GETDATE() WHERE RentalID = @RentalID";
                 using (var cmd = new SqlCommand(updateQuery, conn))
                 {
+                    cmd.Parameters.AddWithValue("@Status", newStatus);
                     cmd.Parameters.AddWithValue("@PenaltyFee", penaltyFee);
                     cmd.Parameters.AddWithValue("@RentalID", rentalId);
                     await cmd.ExecuteNonQueryAsync();
                 }
 
-                //Handle Notifications and Payments
+                //Handle Notifications
                 string subject, body;
                 if (penaltyFee > 0)
                 {
-                    // Create Penalty Payment in PayMongo
-                    var paymentRes = await _paymentRepo.CreatePenaltyPayment(rentalId, penaltyFee);
-                    if (paymentRes.StatusCode == 200) checkoutUrl = paymentRes.Data.CheckoutUrl;
-
-                    subject = "Late Return Penalty";
-                    body = $"You returned the car late. Please pay the penalty fee of PHP {penaltyFee:N2}. <br/> Pay here: <a href='{checkoutUrl}'>Checkout Link</a>";
-
-                    await _notificationRepo.CreateNotification(userId, rentalId, $"You returned the car late. Please pay the penalty fee of PHP {penaltyFee:N2}.");
+                    subject = "Late Return Penalty - Action Required";
+                    body = $"You returned the car late. Please log in to your account and pay the penalty fee of PHP {penaltyFee:N2} to fully close your rental.";
+                    await _notificationRepo.CreateNotification(userId, rentalId, $"You have a pending penalty of PHP {penaltyFee:N2} for late return. Please pay via your history.");
                 }
                 else
                 {
@@ -509,22 +585,14 @@ namespace CarRental.Server
                 await _emailService.SendEmailAsync(userEmail, subject, body);
 
                 response.StatusCode = 200;
-                response.Data = new { PenaltyFee = penaltyFee, CheckoutUrl = checkoutUrl };
-                response.Message = "Car returned successfully.";
+                response.Data = new { PenaltyFee = penaltyFee };
+                response.Message = penaltyFee > 0 ? "Penalty applied. Waiting for user payment." : "Car returned successfully.";
             }
-            catch (Exception ex)
-            {
-                response.StatusCode = 500;
-                response.Message = ex.Message;
-            }
-            finally
-            {
-                await conn.CloseAsync();
-            }
+            catch (Exception ex) { response.StatusCode = 500; response.Message = ex.Message; }
+            finally { await conn.CloseAsync(); }
 
             return response;
         }
-
         public async Task<ServiceResponse<bool>> RequestCancellation(int rentalId, int userId)
         {
             var response = new ServiceResponse<bool>();
@@ -562,9 +630,9 @@ namespace CarRental.Server
                     updateCmd.Parameters.AddWithValue("@RentalID", rentalId);
                     await updateCmd.ExecuteNonQueryAsync();
 
-                    await _notificationRepo.CreateNotification(1, rentalId, $"User requested cancellation for Rental #{rentalId}. Review required.");
+                    await _notificationRepo.CreateNotification(userId, rentalId, $"You requested cancellation for Rental #{rentalId}. Please wait for review.");
 
-                    response.Data = true;
+                response.Data = true;
                     response.StatusCode = 200;
                     response.Message = "Cancellation request submitted successfully.";
                 
@@ -644,14 +712,22 @@ namespace CarRental.Server
                 }
 
                 string query = @"
-                    SELECT r.*, 
-                           CONCAT(u.FirstName, ' ', u.LastName) AS UserName,
-                           c.CarName 
-                    FROM Rentals r
-                    LEFT JOIN Users u ON r.UserID = u.Id
-                    LEFT JOIN Cars c ON r.CarID = c.CarID
-                    WHERE r.UserID = @UserID
-                    ORDER BY r.CreatedAt DESC";
+            SELECT r.*, 
+                   CONCAT(u.FirstName, ' ', u.LastName) AS UserName,
+                   c.CarName,
+                   p.Amount AS AmountPaid,
+                   p.PayMongoRef AS PaymentReference
+            FROM Rentals r
+            LEFT JOIN Users u ON r.UserID = u.Id
+            LEFT JOIN Cars c ON r.CarID = c.CarID
+            OUTER APPLY (
+                SELECT TOP 1 Amount, PayMongoRef 
+                FROM Payment 
+                WHERE RentalID = r.RentalID 
+                ORDER BY CreatedAt DESC
+            ) p
+            WHERE r.UserID = @UserID AND r.IsDeleted = 0
+            ORDER BY r.CreatedAt DESC";
 
                 using (SqlCommand cmd = new SqlCommand(query, conn))
                 {
@@ -675,9 +751,15 @@ namespace CarRental.Server
                                 FullName = reader["FullName"] != DBNull.Value ? reader["FullName"].ToString() : null,
                                 ContactNumber = reader["ContactNumber"] != DBNull.Value ? reader["ContactNumber"].ToString() : null,
                                 PickupLocation = reader["PickupLocation"] != DBNull.Value ? reader["PickupLocation"].ToString() : null,
+                                DriverLicense = reader["DriverLicense"]?.ToString(),
                                 CreatedAt = Convert.ToDateTime(reader["CreatedAt"]),
                                 UpdatedAt = reader["UpdatedAt"] != DBNull.Value ? Convert.ToDateTime(reader["UpdatedAt"]) : DateTime.MinValue,
-                                CarName = reader["CarName"] != DBNull.Value ? reader["CarName"].ToString() : "Unknown Car"
+                                CarName = reader["CarName"] != DBNull.Value ? reader["CarName"].ToString() : "Unknown Car",
+                                PenaltyFee = reader["PenaltyFee"] != DBNull.Value ? Convert.ToDecimal(reader["PenaltyFee"]) : 0,
+
+                                // 🟢 GI-ADD KINI NGA DUHA PARA MA-BASA SA REACT RECEIPT MODAL
+                                Amount = reader["AmountPaid"] != DBNull.Value ? Convert.ToDecimal(reader["AmountPaid"]) : 0,
+                                PaymentReference = reader["PaymentReference"] != DBNull.Value ? reader["PaymentReference"].ToString() : "N/A"
                             });
                         }
                     }
@@ -795,7 +877,7 @@ namespace CarRental.Server
                 cmd.Parameters.AddWithValue("@RentalID", rentalId);
                 await cmd.ExecuteNonQueryAsync();
 
-                // Optional: Mo notify sa Admin
+                //notify sa Admin
                 await _notificationRepo.CreateNotification(1, rentalId, $"User requested to return Rental #{rentalId}. Review needed.");
 
                 response.Data = true;
@@ -851,6 +933,88 @@ namespace CarRental.Server
                 return response;
             }
             return new ServiceResponse<object> { StatusCode = 400, Message = "Invalid action" };
+        }
+
+        public async Task<ServiceResponse<List<BookedDateDto>>> GetBookedDatesForCar(int carId)
+        {
+            var response = new ServiceResponse<List<BookedDateDto>>();
+            var bookedDates = new List<BookedDateDto>();
+
+            try
+            {
+                    await conn.OpenAsync();
+
+                    string query = @"
+                        SELECT StartDate, EndDate 
+                        FROM Rentals 
+                        WHERE CarID = @CarID 
+                        AND Status NOT IN ('Cancelled', 'Returned', 'Rejected')";
+
+                    using (var cmd = new SqlCommand(query, conn))
+                    {
+                        cmd.Parameters.AddWithValue("@CarID", carId);
+                        using (var reader = await cmd.ExecuteReaderAsync())
+                        {
+                            while (await reader.ReadAsync())
+                            {
+                                bookedDates.Add(new BookedDateDto
+                                {
+                                    startDate = Convert.ToDateTime(reader["StartDate"]).ToString("yyyy-MM-dd"),
+                                    endDate = Convert.ToDateTime(reader["EndDate"]).ToString("yyyy-MM-dd")
+                                });
+                            }
+                        }
+                    }
+
+                // I-set ang Success Response
+                response.Data = bookedDates;
+                response.StatusCode = 200;
+                response.Message = "Booked dates fetched successfully.";
+            }
+            catch (Exception ex)
+            {
+                // I-set ang Error Response
+                response.StatusCode = 500;
+                response.Message = ex.Message;
+            }
+
+            return response;
+        }
+
+        public async Task<ServiceResponse<bool>> MoveToTrash(int rentalId)
+        {
+            var response = new ServiceResponse<bool>();
+            try
+            {
+                await conn.OpenAsync();
+                // UPDATE lang ang flag, ayaw i-DELETE
+                string query = "UPDATE Rentals SET IsDeleted = 1, DeletedAt = GETDATE() WHERE RentalID = @RentalID";
+
+                using (var cmd = new SqlCommand(query, conn))
+                {
+                    cmd.Parameters.AddWithValue("@RentalID", rentalId);
+                    int rows = await cmd.ExecuteNonQueryAsync();
+
+                    if (rows > 0)
+                    {
+                        response.Data = true;
+                        response.StatusCode = 200;
+                        response.Message = "Rental moved to trash.";
+                    }
+                    else
+                    {
+                        response.StatusCode = 404;
+                        response.Message = "Rental not found.";
+                    }
+                }
+            }
+            catch (Exception ex)
+            {
+                response.StatusCode = 500;
+                response.Message = ex.Message;
+            }
+            finally { await conn.CloseAsync(); }
+            return response;
         }
     }
 }

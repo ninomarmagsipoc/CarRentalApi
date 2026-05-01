@@ -3,6 +3,9 @@ using CarRental.Model;
 using CarRental.Model.Response;
 using Microsoft.AspNetCore.SignalR.Protocol;
 using System.Data.SqlClient;
+using System.Security.Claims;
+using Microsoft.IdentityModel.Tokens;
+using System.IdentityModel.Tokens.Jwt;
 
 namespace CarRental.Server
 {
@@ -10,11 +13,13 @@ namespace CarRental.Server
     {
         private readonly SqlConnection conn;
         private readonly IWebHostEnvironment _env;
+        private readonly IConfiguration _config;
 
         public AuthService(IConfiguration config, IWebHostEnvironment env)
         {
             conn = new SqlConnection(config["ConnectionStrings:CarRental"]);
             _env = env;
+            _config = config;
         }
 
         public async Task<ServiceResponse<object>> Register(RegisterRequest request)
@@ -128,7 +133,7 @@ namespace CarRental.Server
                 await conn.OpenAsync();
 
                 string query = @"SELECT Id, FirstName, LastName, Email, PasswordHash, IsVerified, Role, ProfileImage
-                                    FROM Users WHERE Email = @Email";
+                                    FROM Users WHERE Email = @Email AND IsBlocked = 0";
 
                 using (SqlCommand cmd = new SqlCommand(query, conn))
                 {
@@ -169,10 +174,13 @@ namespace CarRental.Server
                             return response;
                         }
 
+                        string token = CreateToken(reader["Id"].ToString(), reader["Email"].ToString(), role);
+
                         response.StatusCode = 200;
                         response.Message = "Login successful.";
                         response.Data = new
                         {
+                            Token = token,
                             Id = reader["Id"],
                             FirstName = reader["FirstName"],
                             LastName = reader["LastName"],
@@ -199,6 +207,28 @@ namespace CarRental.Server
                 conn.Close();
             }
             return response;
+        }
+
+        private string CreateToken(string id, string email, string role)
+        {
+            List<Claim> claims = new List<Claim>
+            {
+                new Claim(ClaimTypes.NameIdentifier, id),
+                new Claim(ClaimTypes.Email, email),
+                new Claim(ClaimTypes.Role, role)
+            };
+
+            // Grabs the secret key from your appsettings.json
+            var key = new SymmetricSecurityKey(System.Text.Encoding.UTF8.GetBytes(_config["Jwt:Key"]));
+            var creds = new SigningCredentials(key, SecurityAlgorithms.HmacSha512Signature);
+
+            var token = new JwtSecurityToken(
+                claims: claims,
+                expires: DateTime.UtcNow.AddHours(4),
+                signingCredentials: creds
+            );
+
+            return new JwtSecurityTokenHandler().WriteToken(token);
         }
 
         public async Task<ServiceResponse<object>> SendOtp(string email)
@@ -554,5 +584,204 @@ namespace CarRental.Server
             }
             return response;
         }
+
+        public async Task<ServiceResponse<object>> UpdateProfile(UpdateProfileRequest request)
+        {
+            var response = new ServiceResponse<object>();
+            try
+            {
+                await conn.OpenAsync();
+
+                // 1. I-verify ang OTP ug Kuhaon ang PasswordHash dungan
+                string verifyQuery = @"SELECT VerificationCode, VerificationExpiry, PasswordHash FROM Users WHERE Email = @Email";
+                string storedHash = ""; // Diri nato i-save ang current password sa database
+
+                using (SqlCommand cmd = new SqlCommand(verifyQuery, conn))
+                {
+                    cmd.Parameters.AddWithValue("@Email", request.Email);
+                    using (var reader = await cmd.ExecuteReaderAsync())
+                    {
+                        if (!reader.Read())
+                        {
+                            response.StatusCode = 404; response.Message = "User not found."; return response;
+                        }
+
+                        string storedCode = reader["VerificationCode"]?.ToString();
+                        DateTime expiry = reader["VerificationExpiry"] == DBNull.Value ? DateTime.MinValue : (DateTime)reader["VerificationExpiry"];
+                        storedHash = reader["PasswordHash"]?.ToString(); // Kuhaon nato ang hash
+
+                        if (storedCode != request.OtpCode)
+                        {
+                            response.StatusCode = 400; response.Message = "Invalid OTP."; return response;
+                        }
+                        if (DateTime.UtcNow > expiry)
+                        {
+                            response.StatusCode = 400; response.Message = "OTP has expired. Please request a new one."; return response;
+                        }
+                    }
+                }
+
+                var updateClauses = new List<string>();
+                using (SqlCommand updateCmd = new SqlCommand())
+                {
+                    updateCmd.Connection = conn;
+
+                    if (!string.IsNullOrWhiteSpace(request.FirstName))
+                    {
+                        updateClauses.Add("FirstName = @FN");
+                        updateCmd.Parameters.AddWithValue("@FN", request.FirstName);
+                    }
+
+                    if (!string.IsNullOrWhiteSpace(request.LastName))
+                    {
+                        updateClauses.Add("LastName = @LN");
+                        updateCmd.Parameters.AddWithValue("@LN", request.LastName);
+                    }
+
+                    // 2. SECURITY CHECK PARA SA PASSWORD
+                    if (!string.IsNullOrWhiteSpace(request.NewPassword))
+                    {
+                        // Kung walay gibutang nga current password ang user
+                        if (string.IsNullOrWhiteSpace(request.CurrentPassword))
+                        {
+                            response.StatusCode = 400; response.Message = "Please enter your current password to set a new one."; return response;
+                        }
+
+                        // I-verify kung nag-match ba ang gitype nga current password vs sa database
+                        if (!BCrypt.Net.BCrypt.Verify(request.CurrentPassword, storedHash))
+                        {
+                            response.StatusCode = 400; response.Message = "Incorrect current password. Cannot change password."; return response;
+                        }
+
+                        // Kung sakto, i-hash ang bag-ong password
+                        updateClauses.Add("PasswordHash = @Hash");
+                        updateCmd.Parameters.AddWithValue("@Hash", BCrypt.Net.BCrypt.HashPassword(request.NewPassword));
+                    }
+
+                    if (updateClauses.Count == 0)
+                    {
+                        response.StatusCode = 400; response.Message = "No changes requested."; return response;
+                    }
+
+                    // I-clear ang OTP kay nagamit na
+                    updateClauses.Add("VerificationCode = NULL");
+                    updateClauses.Add("VerificationExpiry = NULL");
+
+                    string updateQuery = $"UPDATE Users SET {string.Join(", ", updateClauses)} WHERE Id = @Id";
+
+                    updateCmd.CommandText = updateQuery;
+                    updateCmd.Parameters.AddWithValue("@Id", request.UserId);
+
+                    await updateCmd.ExecuteNonQueryAsync();
+                }
+
+                response.StatusCode = 200;
+                response.Message = "Profile updated successfully.";
+            }
+            catch (Exception ex)
+            {
+                response.StatusCode = 500; response.Message = ex.Message;
+            }
+            finally
+            {
+                await conn.CloseAsync();
+            }
+            return response;
+        }
+        public async Task<ServiceResponse<List<CustomerDto>>> GetAllCustomers()
+        {
+            var response = new ServiceResponse<List<CustomerDto>>();
+            var customers = new List<CustomerDto>();
+
+            string query = @"
+        SELECT u.Id, u.FirstName, u.LastName, u.Email, u.ProfileImage, u.IsVerified, u.IsBlocked,
+               (SELECT COUNT(*) FROM Rentals r WHERE r.UserId = u.Id AND r.Status = 'Returned') AS TotalRentals
+        FROM Users u
+        WHERE u.Role != 'Admin'"; 
+
+            using (SqlCommand cmd = new SqlCommand(query, conn))
+            {
+                await conn.OpenAsync();
+                using (SqlDataReader reader = await cmd.ExecuteReaderAsync())
+                {
+                    while (await reader.ReadAsync())
+                    {
+                        customers.Add(new CustomerDto
+                        {
+                            Id = Convert.ToInt32(reader["Id"]),
+                            FirstName = reader["FirstName"].ToString()!,
+                            LastName = reader["LastName"].ToString()!,
+                            Email = reader["Email"].ToString()!,
+                            ProfileImage = reader["ProfileImage"] != DBNull.Value ? reader["ProfileImage"].ToString()! : null,
+                            IsVerified = Convert.ToBoolean(reader["IsVerified"]),
+                            IsBlocked = Convert.ToBoolean(reader["IsBlocked"]),
+                            TotalSuccessfulRentals = Convert.ToInt32(reader["TotalRentals"])
+                        });
+                    }
+                }
+                await conn.CloseAsync();
+            }
+            response.Data = customers;
+            response.StatusCode = 200;
+            return response;
+        }
+
+        public async Task<ServiceResponse<string>> ToggleBlockUser(int userId, bool isBlocked)
+        {
+            var response = new ServiceResponse<string>();
+            string query = "UPDATE Users SET IsBlocked = @IsBlocked WHERE Id = @Id AND Role != 'Admin'";
+
+            using (SqlCommand cmd = new SqlCommand(query, conn))
+            {
+                cmd.Parameters.AddWithValue("@IsBlocked", isBlocked);
+                cmd.Parameters.AddWithValue("@Id", userId);
+
+                await conn.OpenAsync();
+                await cmd.ExecuteNonQueryAsync();
+                await conn.CloseAsync();
+            }
+
+            response.StatusCode = 200;
+            response.Message = isBlocked ? "User blocked successfully." : "User unblocked successfully.";
+            return response;
+        }
+
+        public async Task<ServiceResponse<List<CustomerRentalHistoryDto>>> GetCustomerRentalHistory(int userId)
+        {
+            var response = new ServiceResponse<List<CustomerRentalHistoryDto>>();
+            var history = new List<CustomerRentalHistoryDto>();
+
+            string query = @"
+        SELECT r.RentalID, c.CarName, c.CarImage, r.StartDate, r.EndDate, r.TotalPrice
+        FROM Rentals r
+        JOIN Cars c ON r.CarID = c.CarId
+        WHERE r.UserId = @UserId AND r.Status = 'Returned'";
+
+            using (SqlCommand cmd = new SqlCommand(query, conn))
+            {
+                cmd.Parameters.AddWithValue("@UserId", userId);
+                await conn.OpenAsync();
+                using (SqlDataReader reader = await cmd.ExecuteReaderAsync())
+                {
+                    while (await reader.ReadAsync())
+                    {
+                        history.Add(new CustomerRentalHistoryDto
+                        {
+                            RentalId = Convert.ToInt32(reader["RentalID"]),
+                            CarName = reader["CarName"].ToString()!,
+                            CarImage = reader["CarImage"] != DBNull.Value ? reader["CarImage"].ToString()! : null,
+                            StartDate = Convert.ToDateTime(reader["StartDate"]),
+                            EndDate = Convert.ToDateTime(reader["EndDate"]),
+                            TotalAmount = Convert.ToDecimal(reader["TotalPrice"])
+                        });
+                    }
+                }
+                await conn.CloseAsync();
+            }
+            response.Data = history;
+            response.StatusCode = 200;
+            return response;
+        }
+
     }
 }
