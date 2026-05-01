@@ -30,15 +30,22 @@ namespace CarRental.Server
             await conn.OpenAsync();
             bool isSaved = await cmd.ExecuteNonQueryAsync() > 0;
 
-            if (isSaved)
-            {
+            if(isSaved)
+{
                 const string countSql = "SELECT COUNT(*) FROM Notifications WHERE UserID = @UserID AND IsRead = 0";
                 using var countCmd = new SqlCommand(countSql, conn);
                 countCmd.Parameters.AddWithValue("@UserID", userId);
 
                 int unreadCount = (int)await countCmd.ExecuteScalarAsync();
 
-                await _hubContext.Clients.All.SendAsync("ReceiveNotification", unreadCount);
+                if (userId == 1)
+                {
+                    await _hubContext.Clients.All.SendAsync("ReceiveAdminNotification", unreadCount);
+                }
+                else
+                {
+                    await _hubContext.Clients.All.SendAsync("ReceiveUserNotification", userId, unreadCount);
+                }
             }
 
             return isSaved;

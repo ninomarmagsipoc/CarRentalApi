@@ -41,10 +41,10 @@ namespace CarRental.Controllers
                 return BadRequest(new { message = "Reference is required" });
             }
 
-            // Call the service method we created earlier
+          
             var response = await _payment.VerifyPayment(payMongoReference);
 
-            // Return the result to React
+            
             if (response.StatusCode == 200)
             {
                 return Ok(response);
@@ -86,7 +86,7 @@ namespace CarRental.Controllers
         [HttpPost("penalty")]
         public async Task<IActionResult> CreatePenaltyPayment([FromBody] PenaltyRequest request)
         {
-            // Karon, kumpleto na ang 4 ka parameters nga gipangita sa Service!
+           
             var response = await _payment.CreatePenaltyPayment(
                 request.RentalID,
                 request.Amount,

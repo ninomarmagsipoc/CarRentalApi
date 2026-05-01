@@ -26,7 +26,6 @@ namespace CarRental.Server
                 EnableSsl = true
             };
 
-            // Wrap the incoming body text with the HTML design
             string formattedHtmlBody = GetEmailTemplate(subject, body);
 
             var mailMessage = new MailMessage

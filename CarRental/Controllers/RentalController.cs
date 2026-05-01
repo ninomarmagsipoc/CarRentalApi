@@ -119,12 +119,11 @@ namespace CarRental.Controllers
         [HttpGet("car/{carId}/booked-dates")]
         public async Task<IActionResult> GetBookedDatesForCar(int carId)
         {
-            // Tawgon nato ang Service nga atong gibuhat
+           
             var response = await _rental.GetBookedDatesForCar(carId);
 
             if (response.StatusCode == 200)
             {
-                // I-return ra ang .Data aron direkta nga array ang makuha sa imong React frontend
                 return Ok(response.Data);
             }
 
@@ -136,6 +135,35 @@ namespace CarRental.Controllers
         {
             var response = await _rental.MoveToTrash(rentalId);
             return StatusCode(response.StatusCode, response);
+        }
+
+        [HttpPut("{rentalId}/archive")]
+        public async Task<IActionResult> ArchiveRental(int rentalId)
+        {
+            var result = await _rental.ArchiveRental(rentalId);
+            if (result.StatusCode == 200)
+                return Ok(result);
+
+            return StatusCode(result.StatusCode, result);
+        }
+
+        [HttpPut("{rentalId}/hide")]
+        public async Task<IActionResult> HideRentalPermanently(int rentalId)
+        {
+            var result = await _rental.HideRentalPermanently(rentalId);
+            if (result.StatusCode == 200)
+                return Ok(result);
+
+            return StatusCode(result.StatusCode, result);
+        }
+        [HttpPut("{rentalId}/restore")]
+        public async Task<IActionResult> RestoreRental(int rentalId)
+        {
+            var result = await _rental.RestoreRental(rentalId);
+            if (result.StatusCode == 200)
+                return Ok(result);
+
+            return StatusCode(result.StatusCode, result);
         }
     }
 }
