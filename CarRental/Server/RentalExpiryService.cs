@@ -1,5 +1,7 @@
 ﻿using CarRental.IRepository;
+using Dapper;
 using Microsoft.Data.SqlClient;
+using System.Data;
 
 namespace CarRental.Server
 {
@@ -26,96 +28,86 @@ namespace CarRental.Server
 
         private async Task DeleteAbandonedBookings()
         {
-            using var conn = new SqlConnection(_connectionString);
-
-            const string query = @"
-                -- Step 1: Delete associated abandoned payments
-                DELETE FROM Payment 
-                WHERE RentalID IN (
-                    SELECT RentalID FROM Rentals 
-                    WHERE Status = 'Pending' AND CreatedAt < DATEADD(MINUTE, -1, GETDATE())
-                );
-
-                -- Step 2: Delete the abandoned rental records
-                DELETE FROM Rentals 
-                WHERE Status = 'Pending' AND CreatedAt < DATEADD(MINUTE, -1, GETDATE());
-            ";
-
-            await conn.OpenAsync();
-            using var cmd = new SqlCommand(query, conn);
-            int affected = await cmd.ExecuteNonQueryAsync();
-
-            if (affected > 0)
+            try
             {
-                
-                Console.WriteLine($"Automatically deleted abandoned initial checkouts (5-minute rule).");
+                using (var conn = new SqlConnection(_connectionString))
+                {
+                    await conn.OpenAsync();
+
+                    int affected = await conn.ExecuteAsync(
+                        "sp_DeleteAbandonedBookings",
+                        commandType: CommandType.StoredProcedure
+                    );
+
+                    if (affected > 0)
+                    {
+                        Console.WriteLine($"Automatically deleted {affected} rows from abandoned initial checkouts (5-minute rule).");
+                    }
+                }
+            }
+            catch (Exception ex)
+            {
+                Console.WriteLine($"Error in DeleteAbandonedBookings: {ex.Message}");
             }
         }
 
         private async Task RejectExpiredRentals()
         {
             using var scope = _serviceProvider.CreateScope();
-          
+
             var paymentRepo = scope.ServiceProvider.GetRequiredService<IPaymentRepository>();
             var notificationRepo = scope.ServiceProvider.GetRequiredService<INotificationRepository>();
 
-            using var conn = new SqlConnection(_connectionString);
-            await conn.OpenAsync();
-
-           
-            const string selectQuery = @"
-            SELECT p.PaymentID, r.RentalID, r.UserID 
-            FROM Rentals r
-            JOIN Payment p ON r.RentalID = p.RentalID
-                WHERE r.Status = 'Approved' 
-            AND r.UpdatedAt < DATEADD(MINUTE, -2, GETDATE())
-            AND p.PaymentType = 'Partial' 
-            AND p.PaymentStatus = 'Completed'
-            AND r.RentalID NOT IN (
-                SELECT RentalID FROM Payment WHERE PaymentType = 'Full' AND PaymentStatus = 'Completed'
-            )";
-
-            var toRefund = new List<(int PaymentId, int RentalId, int UserId)>();
-
-            using (var cmd = new SqlCommand(selectQuery, conn))
-            using (var reader = await cmd.ExecuteReaderAsync())
+            try
             {
-                while (await reader.ReadAsync())
+                using var conn = new SqlConnection(_connectionString);
+                await conn.OpenAsync();
+
+                var toRefund = await conn.QueryAsync<dynamic>(
+                    "exp_GetExpiredRentalsForRefund",
+                    commandType: CommandType.StoredProcedure
+                );
+
+                foreach (var item in toRefund)
                 {
-                    toRefund.Add((reader.GetInt32(0), reader.GetInt32(1), reader.GetInt32(2)));
+                    int paymentId = item.PaymentID;
+                    int rentalId = item.RentalID;
+                    int userId = item.UserID;
+
+                    try
+                    {
+                        var refundResult = await paymentRepo.RefundPayment(paymentId);
+
+                        if (refundResult.StatusCode == 200)
+                        {
+                            await conn.ExecuteAsync(
+                                "exp_UpdateRentalToCancelled",
+                                new { RentalID = rentalId },
+                                commandType: CommandType.StoredProcedure
+                            );
+
+                            await notificationRepo.CreateNotification(
+                                userId,
+                                rentalId,
+                                "Your rental timed out. Your downpayment has been automatically refunded."
+                            );
+
+                            Console.WriteLine($"[AUTO-REFUND] Successfully processed Refund and Cancelled Rental #{rentalId}");
+                        }
+                        else
+                        {
+                            Console.WriteLine($"[AUTO-REFUND-ERROR] Failed to refund Rental #{rentalId}: {refundResult.Message}");
+                        }
+                    }
+                    catch (Exception ex)
+                    {
+                        Console.WriteLine($"[CRITICAL-ERROR] Auto-refund loop failed for Rental #{rentalId}: {ex.Message}");
+                    }
                 }
             }
-
-            foreach (var item in toRefund)
+            catch (Exception ex)
             {
-                try
-                {
-                    var refundResult = await paymentRepo.RefundPayment(item.PaymentId);
-
-                    if (refundResult.StatusCode == 200)
-                    {
-                        const string updateRentalQuery = "UPDATE Rentals SET Status = 'Cancelled' WHERE RentalID = @RentalID";
-                        using (var updateCmd = new SqlCommand(updateRentalQuery, conn))
-                        {
-                            updateCmd.Parameters.AddWithValue("@RentalID", item.RentalId);
-                            await updateCmd.ExecuteNonQueryAsync();
-                        }
-
-                       
-                        await notificationRepo.CreateNotification(item.UserId, item.RentalId,
-                            "Your rental timed out. Your downpayment has been automatically refunded.");
-
-                        Console.WriteLine($"[AUTO-REFUND] Successfully processed Refund and Cancelled Rental #{item.RentalId}");
-                    }
-                    else
-                    {
-                        Console.WriteLine($"[AUTO-REFUND-ERROR] Failed to refund Rental #{item.RentalId}: {refundResult.Message}");
-                    }
-                }
-                catch (Exception ex)
-                {
-                    Console.WriteLine($"[CRITICAL-ERROR] Auto-refund loop failed for Rental #{item.RentalId}: {ex.Message}");
-                }
+                Console.WriteLine($"[CRITICAL-ERROR] Database check failed in RejectExpiredRentals: {ex.Message}");
             }
         }
     }

@@ -1,14 +1,16 @@
 ﻿using CarRental.Hub;
 using CarRental.IRepository;
 using CarRental.Model;
-using Microsoft.AspNetCore.SignalR; 
+using Dapper;
+using Microsoft.AspNetCore.SignalR;
 using Microsoft.Data.SqlClient;
+using System.Data;
 namespace CarRental.Server
 {
     public class NotificationService : INotificationRepository
     {
         private readonly string _connectionString;
-        private readonly IHubContext<NotificationHub> _hubContext; 
+        private readonly IHubContext<NotificationHub> _hubContext;
 
         public NotificationService(IConfiguration configuration, IHubContext<NotificationHub> hubContext)
         {
@@ -18,75 +20,79 @@ namespace CarRental.Server
 
         public async Task<bool> CreateNotification(int userId, int rentalId, string message)
         {
-            using var conn = new SqlConnection(_connectionString);
-            const string sql = @"INSERT INTO Notifications (UserID, RentalID, Message, IsRead, CreatedAt) 
-                                VALUES (@UserID, @RentalID, @Message, 0, GETDATE())";
-
-            using var cmd = new SqlCommand(sql, conn);
-            cmd.Parameters.AddWithValue("@UserID", userId);
-            cmd.Parameters.AddWithValue("@RentalID", rentalId);
-            cmd.Parameters.AddWithValue("@Message", message);
-
-            await conn.OpenAsync();
-            bool isSaved = await cmd.ExecuteNonQueryAsync() > 0;
-
-            if(isSaved)
-{
-                const string countSql = "SELECT COUNT(*) FROM Notifications WHERE UserID = @UserID AND IsRead = 0";
-                using var countCmd = new SqlCommand(countSql, conn);
-                countCmd.Parameters.AddWithValue("@UserID", userId);
-
-                int unreadCount = (int)await countCmd.ExecuteScalarAsync();
-
-                if (userId == 1)
+            try
+            {
+                using (var conn = new SqlConnection(_connectionString))
                 {
-                    await _hubContext.Clients.All.SendAsync("ReceiveAdminNotification", unreadCount);
-                }
-                else
-                {
-                    await _hubContext.Clients.All.SendAsync("ReceiveUserNotification", userId, unreadCount);
+                    await conn.OpenAsync();
+
+                    int unreadCount = await conn.ExecuteScalarAsync<int>(
+                        "noti_CreateNotification",
+                        new
+                        {
+                            UserID = userId,
+                            RentalID = rentalId,
+                            Message = message
+                        },
+                        commandType: CommandType.StoredProcedure
+                    );
+
+                    if (userId == 1)
+                    {
+                        await _hubContext.Clients.All.SendAsync("ReceiveAdminNotification", unreadCount);
+                    }
+                    else
+                    {
+                        await _hubContext.Clients.All.SendAsync("ReceiveUserNotification", userId, unreadCount);
+                    }
+
+                    return true;
                 }
             }
-
-            return isSaved;
+            catch (Exception ex)
+            {
+                Console.WriteLine($"Notification Error: {ex.Message}");
+                return false;
+            }
         }
-
         public async Task<IEnumerable<Notification>> GetUserNotifications(int userId)
         {
-            var list = new List<Notification>();
-            using var conn = new SqlConnection(_connectionString);
-            const string sql = "SELECT * FROM Notifications WHERE UserID = @UserID ORDER BY CreatedAt DESC";
-
-            using var cmd = new SqlCommand(sql, conn);
-            cmd.Parameters.AddWithValue("@UserID", userId);
-
-            await conn.OpenAsync();
-            using var reader = await cmd.ExecuteReaderAsync();
-            while (await reader.ReadAsync())
+            using (var conn = new SqlConnection(_connectionString))
             {
-                list.Add(new Notification
-                {
-                    NotificationID = reader.GetInt32(0),
-                    UserID = reader.GetInt32(1),
-                    RentalID = reader.GetInt32(2),
-                    Message = reader.GetString(3),
-                    IsRead = reader.GetBoolean(4),
-                    CreatedAt = reader.GetDateTime(5)
-                });
+                await conn.OpenAsync();
+
+                var notifications = await conn.QueryAsync<Notification>(
+                    "noti_GetUserNotifications",
+                    new { UserID = userId },
+                    commandType: CommandType.StoredProcedure
+                );
+
+                return notifications;
             }
-            return list;
         }
 
         public async Task<bool> MarkAsRead(int notificationId)
         {
-            using var conn = new SqlConnection(_connectionString);
-            const string sql = "UPDATE Notifications SET IsRead = 1 WHERE NotificationID = @ID";
+            try
+            {
+                using (var conn = new SqlConnection(_connectionString))
+                {
+                    await conn.OpenAsync();
 
-            using var cmd = new SqlCommand(sql, conn);
-            cmd.Parameters.AddWithValue("@ID", notificationId);
+                    int rows = await conn.ExecuteAsync(
+                        "sp_MarkNotificationAsRead",
+                        new { NotificationID = notificationId },
+                        commandType: CommandType.StoredProcedure
+                    );
 
-            await conn.OpenAsync();
-            return await cmd.ExecuteNonQueryAsync() > 0;
+                    return rows > 0;
+                }
+            }
+            catch (Exception ex)
+            {
+                Console.WriteLine($"Error in MarkAsRead: {ex.Message}");
+                return false;
+            }
         }
     }
 }

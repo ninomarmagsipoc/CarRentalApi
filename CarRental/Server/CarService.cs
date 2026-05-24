@@ -1,6 +1,8 @@
 ﻿using CarRental.IRepository;
 using CarRental.Model;
 using CarRental.Model.Response;
+using Dapper;
+using System.Data;
 using System.Data.SqlClient;
 
 namespace CarRental.Server
@@ -16,56 +18,35 @@ namespace CarRental.Server
             _env = env;
         }
 
-        public async Task<ServiceResponse<object>> GetCars(int? userId = null) 
+        public async Task<ServiceResponse<object>> GetCars(int? userId = null)
         {
             var response = new ServiceResponse<object>();
-            var cars = new List<object>();
 
             try
             {
-                await conn.OpenAsync();
+                if (conn.State == ConnectionState.Closed)
+                    await conn.OpenAsync();
 
-                string query = @"
-                SELECT c.*, 
-                       CASE WHEN f.FavoriteID IS NOT NULL THEN 1 ELSE 0 END AS IsFavorite,
-                       (SELECT TOP 1 Status FROM Rentals r 
-                        WHERE r.CarID = c.CarID 
-                        AND r.Status NOT IN ('Cancelled', 'Returned', 'Rejected')
-                        AND CAST(GETDATE() AS DATE) BETWEEN CAST(r.StartDate AS DATE) AND CAST(r.EndDate AS DATE)
-                       ) AS CurrentStatus
-                FROM Cars c 
-                LEFT JOIN Favorites f ON c.CarID = f.CarID AND f.UserID = @UserID WHERE IsHidden = 0";
+                var cars = await conn.QueryAsync<CarModel>(
+                    "cars_GetCars",
+                    new { UserId = userId },
+                    commandType: CommandType.StoredProcedure
+                );
 
-                using (SqlCommand cmd = new SqlCommand(query, conn))
-                {
-                    cmd.Parameters.AddWithValue("@UserID", userId);
-
-                    using (SqlDataReader reader = await cmd.ExecuteReaderAsync())
-                    {
-                        while (await reader.ReadAsync())
-                        {
-                            cars.Add(new
-                            {
-                                CarID = reader["CarID"],
-                                CarName = reader["CarName"].ToString(),
-                                CarInfo = reader["CarInfo"]?.ToString(),
-                                Seats = reader["Seats"],
-                                PricePerDay = reader["PricePerDay"],
-                                CarImage = reader["CarImage"]?.ToString(),
-                                IsFavorite = Convert.ToBoolean(reader["IsFavorite"]) 
-                            });
-                        }
-                    }
-                }
                 response.StatusCode = 200;
                 response.Data = cars;
+                response.Message = "Cars retrieved successfully.";
             }
             catch (Exception ex)
             {
                 response.StatusCode = 500;
-                response.Message = ex.Message;
+                response.Message = "Error: " + ex.Message;
             }
-            finally { await conn.CloseAsync(); }
+            finally
+            {
+                if (conn.State == ConnectionState.Open)
+                    await conn.CloseAsync();
+            }
 
             return response;
         }
@@ -75,41 +56,18 @@ namespace CarRental.Server
             var response = new ServiceResponse<string>();
             try
             {
-                await conn.OpenAsync();
+                if (conn.State == ConnectionState.Closed)
+                    await conn.OpenAsync();
 
-                string checkQuery = "SELECT COUNT(1) FROM Favorites WHERE UserID = @UID AND CarID = @CID";
-                int count = 0;
-
-                using (SqlCommand checkCmd = new SqlCommand(checkQuery, conn))
-                {
-                    checkCmd.Parameters.AddWithValue("@UID", userId);
-                    checkCmd.Parameters.AddWithValue("@CID", carId);
-                    count = (int)await checkCmd.ExecuteScalarAsync();
-                }
-
-                string actionMessage = "";
-                string actionQuery = "";
-
-                if (count > 0)
-                {
-                    actionQuery = "DELETE FROM Favorites WHERE UserID = @UID AND CarID = @CID";
-                    actionMessage = "Removed from favorites";
-                }
-                else
-                {
-                    actionQuery = "INSERT INTO Favorites (UserID, CarID) VALUES (@UID, @CID)";
-                    actionMessage = "Added to favorites";
-                }
-
-                using (SqlCommand actionCmd = new SqlCommand(actionQuery, conn))
-                {
-                    actionCmd.Parameters.AddWithValue("@UID", userId);
-                    actionCmd.Parameters.AddWithValue("@CID", carId);
-                    await actionCmd.ExecuteNonQueryAsync(); 
-                }
+                var actionMessage = await conn.QueryFirstOrDefaultAsync<string>(
+                    "sp_ToggleFavorite",
+                    new { UserId = userId, CarId = carId },
+                    commandType: CommandType.StoredProcedure
+                );
 
                 response.StatusCode = 200;
                 response.Data = actionMessage;
+                response.Message = actionMessage;
             }
             catch (Exception ex)
             {
@@ -118,7 +76,8 @@ namespace CarRental.Server
             }
             finally
             {
-                await conn.CloseAsync();
+                if (conn.State == ConnectionState.Open)
+                    await conn.CloseAsync();
             }
             return response;
         }
@@ -126,42 +85,32 @@ namespace CarRental.Server
         public async Task<ServiceResponse<List<CarBookingDTO>>> GetCarBookings(int carId)
         {
             var response = new ServiceResponse<List<CarBookingDTO>>();
-            var bookings = new List<CarBookingDTO>();
 
             try
             {
-                await conn.OpenAsync();
+                if (conn.State == ConnectionState.Closed)
+                    await conn.OpenAsync();
 
-                string query = @"SELECT StartDate, EndDate, Status 
-                         FROM Rentals 
-                         WHERE CarID = @CarID 
-                         AND Status IN ('Approved', 'Rented')";
+                var bookings = await conn.QueryAsync<CarBookingDTO>(
+                    "cars_GetCarBookings",
+                    new { CarId = carId },
+                    commandType: CommandType.StoredProcedure
+                );
 
-                using (SqlCommand cmd = new SqlCommand(query, conn))
-                {
-                    cmd.Parameters.AddWithValue("@CarID", carId);
-                    using (SqlDataReader reader = await cmd.ExecuteReaderAsync())
-                    {
-                        while (await reader.ReadAsync())
-                        {
-                            bookings.Add(new CarBookingDTO
-                            {
-                                StartDate = Convert.ToDateTime(reader["StartDate"]),
-                                EndDate = Convert.ToDateTime(reader["EndDate"]),
-                                Status = reader["Status"].ToString()
-                            });
-                        }
-                    }
-                }
-                response.Data = bookings;
+                response.Data = bookings.ToList();
                 response.StatusCode = 200;
+                response.Message = "Bookings retrieved successfully.";
             }
             catch (Exception ex)
             {
                 response.StatusCode = 500;
                 response.Message = "Error fetching bookings: " + ex.Message;
             }
-            finally { await conn.CloseAsync(); }
+            finally
+            {
+                if (conn.State == ConnectionState.Open)
+                    await conn.CloseAsync();
+            }
 
             return response;
         }
@@ -171,45 +120,35 @@ namespace CarRental.Server
             var response = new ServiceResponse<string>();
             try
             {
-                await conn.OpenAsync();
+                if (conn.State == ConnectionState.Closed)
+                    await conn.OpenAsync();
 
-                string checkQuery = @"
-                    SELECT COUNT(1) 
-                    FROM Rentals 
-                    WHERE CarID = @CarID AND Status IN ('Approved', 'Rented')";
+                var result = await conn.QueryFirstOrDefaultAsync<dynamic>(
+                    "sp_HideCar",
+                    new { CarId = carId },
+                    commandType: CommandType.StoredProcedure
+                );
 
-                using (SqlCommand checkCmd = new SqlCommand(checkQuery, conn))
+                if (result != null)
                 {
-                    checkCmd.Parameters.AddWithValue("@CarID", carId);
-                    int activeRentals = (int)await checkCmd.ExecuteScalarAsync();
+                    response.StatusCode = (int)result.StatusCode;
+                    response.Message = (string)result.Message;
 
-                    if (activeRentals > 0)
+                    if (response.StatusCode == 200)
                     {
-                        response.StatusCode = 400;
-                        response.Message = "Can't hide if you're currently 'Approved' or 'Rented' yet.";
-                        return response;
+                        response.Data = response.Message;
                     }
                 }
-
-                string updateQuery = "UPDATE Cars SET IsHidden = 1 WHERE CarID = @CarID";
-
-                using (SqlCommand cmd = new SqlCommand(updateQuery, conn))
-                {
-                    cmd.Parameters.AddWithValue("@CarID", carId);
-                    await cmd.ExecuteNonQueryAsync();
-                }
-
-                response.Data = "Car successfully hidden.";
-                response.StatusCode = 200;
             }
             catch (Exception ex)
             {
                 response.StatusCode = 500;
-                response.Message = ex.Message;
+                response.Message = "Error: " + ex.Message;
             }
             finally
             {
-                await conn.CloseAsync();
+                if (conn.State == ConnectionState.Open)
+                    await conn.CloseAsync();
             }
             return response;
         }
@@ -219,7 +158,7 @@ namespace CarRental.Server
             var response = new ServiceResponse<string>();
             try
             {
-                string imagePath = "";
+                string imagePath = null;
 
                 if (request.ImageFile != null && request.ImageFile.Length > 0)
                 {
@@ -229,7 +168,7 @@ namespace CarRental.Server
                         Directory.CreateDirectory(uploadsFolder);
                     }
 
-                    string uniqueFileName = Guid.NewGuid().ToString() + "_" + request.ImageFile.FileName;
+                    string uniqueFileName = $"{Guid.NewGuid()}_{request.ImageFile.FileName}";
                     string filePath = Path.Combine(uploadsFolder, uniqueFileName);
 
                     using (var fileStream = new FileStream(filePath, FileMode.Create))
@@ -240,20 +179,19 @@ namespace CarRental.Server
                     imagePath = "/images/" + uniqueFileName;
                 }
 
-                await conn.OpenAsync();
-                string query = @"INSERT INTO Cars (CarName, CarInfo, Seats, PricePerDay, CarImage) 
-                         VALUES (@CarName, @CarInfo, @Seats, @PricePerDay, @CarImage)";
+                if (conn.State == ConnectionState.Closed)
+                    await conn.OpenAsync();
 
-                using (SqlCommand cmd = new SqlCommand(query, conn))
+                var parameters = new
                 {
-                    cmd.Parameters.AddWithValue("@CarName", request.CarName);
-                    cmd.Parameters.AddWithValue("@CarInfo", request.CarInfo);
-                    cmd.Parameters.AddWithValue("@Seats", request.Seats);
-                    cmd.Parameters.AddWithValue("@PricePerDay", request.PricePerDay);
-                    cmd.Parameters.AddWithValue("@CarImage", string.IsNullOrEmpty(imagePath) ? DBNull.Value : imagePath);
+                    request.CarName,
+                    request.CarInfo,
+                    request.Seats,
+                    request.PricePerDay,
+                    CarImage = imagePath
+                };
 
-                    await cmd.ExecuteNonQueryAsync();
-                }
+                await conn.ExecuteAsync("cars_AddCar", parameters, commandType: CommandType.StoredProcedure);
 
                 response.Data = "Car added successfully!";
                 response.StatusCode = 200;
@@ -263,7 +201,12 @@ namespace CarRental.Server
                 response.StatusCode = 500;
                 response.Message = "Error adding car: " + ex.Message;
             }
-            finally { await conn.CloseAsync(); }
+            finally
+            {
+                if (conn.State == ConnectionState.Open)
+                    await conn.CloseAsync();
+            }
+
             return response;
         }
 
@@ -278,8 +221,10 @@ namespace CarRental.Server
                 {
                     string uploadFolder = Path.Combine(_env.WebRootPath, "images");
                     if (!Directory.Exists(uploadFolder)) Directory.CreateDirectory(uploadFolder);
-                    string uniqueFileName = Guid.NewGuid().ToString() + "_" + request.ImageFile.FileName;
+
+                    string uniqueFileName = $"{Guid.NewGuid()}_{request.ImageFile.FileName}";
                     string filePath = Path.Combine(uploadFolder, uniqueFileName);
+
                     using (var fileStream = new FileStream(filePath, FileMode.Create))
                     {
                         await request.ImageFile.CopyToAsync(fileStream);
@@ -287,28 +232,20 @@ namespace CarRental.Server
                     imagePath = "/images/" + uniqueFileName;
                 }
 
-                await conn.OpenAsync();
+                if (conn.State == ConnectionState.Closed) await conn.OpenAsync();
 
-                string query = @"UPDATE Cars 
-                         SET CarName = @CarName, CarInfo = @CarInfo, Seats = @Seats, 
-                             PricePerDay = @PricePerDay, MaintenanceMonth = @MaintenanceMonth " +
-                                 (imagePath != null ? ", CarImage = @CarImage " : " ") +
-                                 "WHERE CarID = @CarID";
-
-                using (SqlCommand cmd = new SqlCommand(query, conn))
+                var parameters = new
                 {
-                    cmd.Parameters.AddWithValue("@CarID", carId);
-                    cmd.Parameters.AddWithValue("@CarName", request.CarName);
-                    cmd.Parameters.AddWithValue("@CarInfo", request.CarInfo);
-                    cmd.Parameters.AddWithValue("@Seats", request.Seats);
-                    cmd.Parameters.AddWithValue("@PricePerDay", request.PricePerDay);
-                    cmd.Parameters.AddWithValue("@MaintenanceMonth", string.IsNullOrEmpty(request.MaintenanceMonth) ? (object)DBNull.Value : request.MaintenanceMonth);
+                    CarId = carId,
+                    request.CarName,
+                    request.CarInfo,
+                    request.Seats,
+                    request.PricePerDay,
+                    request.MaintenanceMonth,
+                    CarImage = imagePath
+                };
 
-                    if (imagePath != null)
-                        cmd.Parameters.AddWithValue("@CarImage", imagePath);
-
-                    await cmd.ExecuteNonQueryAsync();
-                }
+                await conn.ExecuteAsync("cars_EditCar", parameters, commandType: CommandType.StoredProcedure);
 
                 response.Data = "Car updated successfully!";
                 response.StatusCode = 200;
@@ -327,62 +264,65 @@ namespace CarRental.Server
             var response = new ServiceResponse<string>();
             try
             {
-                await conn.OpenAsync();
-                string query = "UPDATE Cars SET IsHidden = 0 WHERE CarID = @CarID";
-                using (SqlCommand cmd = new SqlCommand(query, conn))
+                if (conn.State == ConnectionState.Closed)
+                    await conn.OpenAsync();
+
+                int rowsAffected = await conn.ExecuteScalarAsync<int>(
+                    "cars_RestoreCar",
+                    new { CarId = carId },
+                    commandType: CommandType.StoredProcedure
+                );
+
+                if (rowsAffected == 0)
                 {
-                    cmd.Parameters.AddWithValue("@CarID", carId);
-                    await cmd.ExecuteNonQueryAsync();
+                    response.StatusCode = 404;
+                    response.Message = "Car not found or already visible.";
+                    return response;
                 }
+
                 response.Data = "Car restored successfully";
                 response.StatusCode = 200;
             }
             catch (Exception ex)
             {
                 response.StatusCode = 500;
-                response.Message = ex.Message;
+                response.Message = "Error: " + ex.Message;
             }
-            finally { await conn.CloseAsync(); }
+            finally
+            {
+                if (conn.State == ConnectionState.Open)
+                    await conn.CloseAsync();
+            }
             return response;
         }
         public async Task<ServiceResponse<object>> GetArchivedCars()
         {
             var response = new ServiceResponse<object>();
-            var cars = new List<object>();
 
             try
             {
-                await conn.OpenAsync();
-                string query = "SELECT * FROM Cars WHERE IsHidden = 1";
+                if (conn.State == ConnectionState.Closed)
+                    await conn.OpenAsync();
 
-                using (SqlCommand cmd = new SqlCommand(query, conn))
-                using (SqlDataReader reader = await cmd.ExecuteReaderAsync())
-                {
-                    while (await reader.ReadAsync())
-                    {
-                        cars.Add(new
-                        {
-                            CarID = reader["CarID"],
-                            CarName = reader["CarName"].ToString(),
-                            CarInfo = reader["CarInfo"].ToString(),
-                            Seats = Convert.ToInt32(reader["Seats"]),
-                            PricePerDay = Convert.ToDecimal(reader["PricePerDay"]),
-                            CarImage = reader["CarImage"] == DBNull.Value ? null : reader["CarImage"].ToString(),
-                            MaintenanceMonth = reader["MaintenanceMonth"] == DBNull.Value ? null : reader["MaintenanceMonth"].ToString(),
-                            IsHidden = true 
-                        });
-                    }
-                }
+                var cars = await conn.QueryAsync<CarModel>(
+                    "cars_GetArchivedCars",
+                    commandType: CommandType.StoredProcedure
+                );
 
                 response.Data = cars;
                 response.StatusCode = 200;
+                response.Message = "Archived cars retrieved successfully.";
             }
             catch (Exception ex)
             {
                 response.StatusCode = 500;
                 response.Message = "Error fetching archived cars: " + ex.Message;
             }
-            finally { await conn.CloseAsync(); }
+            finally
+            {
+                if (conn.State == ConnectionState.Open)
+                    await conn.CloseAsync();
+            }
 
             return response;
         }
