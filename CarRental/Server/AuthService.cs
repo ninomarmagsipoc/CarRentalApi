@@ -2,11 +2,12 @@
 using CarRental.Model;
 using CarRental.Model.Response;
 using Microsoft.AspNetCore.SignalR.Protocol;
-using System.Data.SqlClient;
-using System.Security.Claims;
 using Microsoft.IdentityModel.Tokens;
+using System.Data;
+using System.Data.SqlClient;
 using System.IdentityModel.Tokens.Jwt;
-
+using System.Security.Claims;
+using Dapper;
 namespace CarRental.Server
 {
     public class AuthService : IAuthRepository
@@ -54,49 +55,44 @@ namespace CarRental.Server
 
                 await conn.OpenAsync();
 
-                string check = "SELECT COUNT(*) FROM Users WHERE Email = @Email";
-                using (SqlCommand cmd = new SqlCommand(check, conn))
-                {
-                    cmd.Parameters.AddWithValue("@Email", request.Email);
-                    int count = (int)await cmd.ExecuteScalarAsync();
+                var p = new DynamicParameters();
+                p.Add("@Email", request.Email);
+                p.Add("@EmailCount", dbType: DbType.Boolean, direction: ParameterDirection.Output);
 
-                    if (count > 0)
-                    {
-                        response.StatusCode = 400;
-                        response.Message = "Email already exists.";
-                        return response;
-                    }
+                await conn.ExecuteAsync("sp_CheckEmailExists", p, commandType: CommandType.StoredProcedure);
+
+                int emailExists = p.Get<int>("@EmailCount");
+
+                if (emailExists > 0)
+                {
+                    response.StatusCode = 400;
+                    response.Message = "Email already exists!";
+                    return response;
                 }
 
                 string hash = BCrypt.Net.BCrypt.HashPassword(request.Password);
 
-                string insert = "INSERT INTO Users (FirstName, LastName, Email, PasswordHash)" +
-                    " VALUES (@FirstName, @LastName, @Email, @PasswordHash)";
-
-                using (SqlCommand cmd = new SqlCommand(insert, conn))
+                var reg = new
                 {
-                    cmd.Parameters.AddWithValue("@FirstName", request.FirstName);
-                    cmd.Parameters.AddWithValue("@LastName", request.LastName);
-                    cmd.Parameters.AddWithValue("@Email", request.Email);
-                    cmd.Parameters.AddWithValue("@PasswordHash", hash);
+                    FirstName = request.FirstName,
+                    LastName = request.LastName,
+                    Email = request.Email,
+                    PasswordHash = hash
+                };
 
-                    await cmd.ExecuteNonQueryAsync();
-                }
+                await conn.ExecuteAsync("sp_InsetUser", reg, commandType: CommandType.StoredProcedure);
 
                 string code = new Random().Next(100000, 999999).ToString();
 
-               
-                string otpQuery = @"UPDATE Users 
-                    SET VerificationCode = @Code, VerificationExpiry = @Expiry 
-                    WHERE Email = @Email";
 
-                using (SqlCommand otpCmd = new SqlCommand(otpQuery, conn))
+                var sendOTP = new
                 {
-                    otpCmd.Parameters.AddWithValue("@Code", code);
-                    otpCmd.Parameters.AddWithValue("@Expiry", DateTime.UtcNow.AddMinutes(1));
-                    otpCmd.Parameters.AddWithValue("@Email", request.Email);
-                    await otpCmd.ExecuteNonQueryAsync();
-                }
+                    Code = code,
+                    Expiry = DateTime.UtcNow.AddMinutes(1),
+                    Email = request.Email
+                };
+
+                await conn.ExecuteAsync("sp_UpdateUserOTP", sendOTP, commandType: CommandType.StoredProcedure);
 
                 await SendOtpEmail(request.Email, code);
 
@@ -132,70 +128,47 @@ namespace CarRental.Server
 
                 await conn.OpenAsync();
 
-                string query = @"SELECT Id, FirstName, LastName, Email, PasswordHash, IsVerified, Role, ProfileImage
-                                    FROM Users WHERE Email = @Email AND IsBlocked = 0";
-
-                using (SqlCommand cmd = new SqlCommand(query, conn))
+                var user = await conn.QueryFirstOrDefaultAsync<User>("sp_Login",
+                    new { Email = request.Email }, commandType: CommandType.StoredProcedure
+                    );
+                if (user == null)
                 {
-                    cmd.Parameters.AddWithValue("@Email", request.Email);
-
-                    var reader = await cmd.ExecuteReaderAsync();
-
-                    if (reader.Read())
-                    {
-                        string role = reader["Role"].ToString();
-                        string hash = reader["PasswordHash"].ToString();
-
-                        bool valid = BCrypt.Net.BCrypt.Verify(request.Password, hash);
-
-                        if (!valid)
-                        {
-                            response.StatusCode = 401;
-                            response.Message = "Invalid password.";
-                            return response;
-                        }
-
-                        if (!request.Email.Contains("@"))
-                        {
-                            response.StatusCode = 400;
-                            response.Message = "Invalid email format.";
-                            return response;
-                        }
-
-                        
-
-                        bool isVerified = (bool)reader["IsVerified"];
-
-                        if (!isVerified)
-                        {
-                            response.StatusCode = 400;
-                            response.Message = "Email is not Verified, Please Verify it";
-                            response.Data = new { IsVerified = false };
-                            return response;
-                        }
-
-                        string token = CreateToken(reader["Id"].ToString(), reader["Email"].ToString(), role);
-
-                        response.StatusCode = 200;
-                        response.Message = "Login successful.";
-                        response.Data = new
-                        {
-                            Token = token,
-                            Id = reader["Id"],
-                            FirstName = reader["FirstName"],
-                            LastName = reader["LastName"],
-                            Email = reader["Email"],
-                            IsVerified = isVerified,
-                            Role = role,
-                            ProfileImage = reader["ProfileImage"] == DBNull.Value ? "https://i.pravatar.cc/150" : reader["ProfileImage"].ToString()
-                        };
-                    }
-                    else
-                    {
-                        response.StatusCode = 404;
-                        response.Message = "User not found.";
-                    }
+                    response.StatusCode = 404;
+                    response.Message = "User not found.";
+                    return response;
                 }
+
+                bool valid = BCrypt.Net.BCrypt.Verify(request.Password, user.PasswordHash);
+                if (!valid)
+                {
+                    response.StatusCode = 401;
+                    response.Message = "Invalid password.";
+                    return response;
+                }
+
+                if (!user.IsVerified)
+                {
+                    response.StatusCode = 400;
+                    response.Message = "Email is not Verified, Please Verify it";
+                    response.Data = new { IsVerified = false };
+                    return response;
+                }
+
+                string token = CreateToken(user.Id.ToString(), user.Email, user.Role);
+
+                response.StatusCode = 200;
+                response.Message = "Login successful.";
+                response.Data = new
+                {
+                    Token = token,
+                    Id = user.Id,
+                    FirstName = user.FirstName,
+                    LastName = user.LastName,
+                    Email = user.Email,
+                    IsVerified = user.IsVerified,
+                    Role = user.Role,
+                    ProfileImage = string.IsNullOrEmpty(user.ProfileImage) ? "https://i.pravatar.cc/150" : user.ProfileImage
+                };
             }
             catch (Exception ex)
             {
@@ -240,20 +213,20 @@ namespace CarRental.Server
 
                 string code = new Random().Next(100000, 999999).ToString();
 
-                string query = @"UPDATE Users SET VerificationCode = @Code, VerificationExpiry = @Expiry WHERE Email = @Email";
-
-                using (SqlCommand cmd = new SqlCommand(query, conn))
+                var paramerter = new
                 {
-                    cmd.Parameters.AddWithValue("@Code", code);
-                    cmd.Parameters.AddWithValue("@Expiry", DateTime.UtcNow.AddMinutes(1));
-                    cmd.Parameters.AddWithValue("@Email", email);
-                    int rows = await cmd.ExecuteNonQueryAsync();
-                    if (rows == 0)
-                    {
-                        response.StatusCode = 404;
-                        response.Message = "User not found.";
-                        return response;
-                    }
+                    Code = code,
+                    Expiry = DateTime.UtcNow.AddMinutes(1),
+                    Email = email
+                };
+
+                int rowAffected = await conn.ExecuteAsync("sp_UpdateUserOTP", paramerter, commandType: CommandType.StoredProcedure);
+
+                if (rowAffected == 0)
+                {
+                    response.StatusCode = 404;
+                    response.Message = "User not found";
+                    return response;
                 }
 
                 await SendOtpEmail(email, code);
@@ -280,64 +253,32 @@ namespace CarRental.Server
             var response = new ServiceResponse<object>();
             try
             {
-                await conn.OpenAsync();
-                string query = @"SELECT VerificationCode, VerificationExpiry FROM Users WHERE Email = @Email";
-                using (SqlCommand cmd = new SqlCommand(query, conn))
+                if (conn.State == ConnectionState.Closed)
+                    await conn.OpenAsync();
+
+                var result = await conn.QueryFirstOrDefaultAsync<dynamic>(
+                    "sp_VerifyUserOtp",
+                    new { Email = email, Code = code },
+                    commandType: CommandType.StoredProcedure
+                );
+
+                if (result != null)
                 {
-                    cmd.Parameters.AddWithValue("@Email", email);
-                    var reader = await cmd.ExecuteReaderAsync();
-                    if (reader.Read())
-                    {
-                        string storedCode = reader["VerificationCode"]?.ToString();
-                        DateTime expiry = reader["VerificationExpiry"] == DBNull.Value
-                    ? DateTime.MinValue
-                    : (DateTime)reader["VerificationExpiry"];
-                        if (DateTime.UtcNow > expiry)
-                        {
-                            response.StatusCode = 400;
-                            response.Message = "OTP has expired.";
-                            return response;
-                        }
-                        if (storedCode != code)
-                        {
-                            response.StatusCode = 400;  
-                            response.Message = "Invalid OTP.";
-                            return response;
-                        }
-
-                        reader.Close();
-
-                        string update = @"UPDATE Users 
-                  SET IsVerified = 1, VerificationCode = NULL, VerificationExpiry = NULL 
-                  WHERE Email = @Email"; ;
-
-                        using (SqlCommand updateCmd = new SqlCommand(update, conn))
-                        {
-                            updateCmd.Parameters.AddWithValue("@Email", email);
-                            await updateCmd.ExecuteNonQueryAsync();
-                        }
-
-                        response.StatusCode = 200;
-                        response.Message = "OTP verified successfully.";
-                    }
-                    else
-                    {
-                        response.StatusCode = 404;
-                        response.Message = "User not found.";
-                    }
+                    response.StatusCode = (int)result.StatusCode;
+                    response.Message = (string)result.Message;
                 }
             }
             catch (Exception ex)
             {
                 response.StatusCode = 500;
-                response.Message = ex.Message;
+                response.Message = "Error: " + ex.Message;
             }
             finally
             {
-                await conn.CloseAsync();
+                if (conn.State == ConnectionState.Open)
+                    await conn.CloseAsync();
             }
             return response;
-
         }
 
         public async Task SendOtpEmail(string email, string code)
@@ -363,32 +304,31 @@ namespace CarRental.Server
 
         public async Task<ServiceResponse<object>> SendResetOtp(string email)
         {
-
             var response = new ServiceResponse<object>();
 
             try
             {
-                await conn.OpenAsync();
+                if (conn.State == ConnectionState.Closed)
+                    await conn.OpenAsync();
 
                 string code = new Random().Next(100000, 999999).ToString();
 
-                string query = @"UPDATE Users SET ResetToken = @Code, ResetTokenExpiry = @Expiry WHERE Email = @Email";
-
-                using (SqlCommand cmd = new SqlCommand(query, conn))
-                {
-
-                    cmd.Parameters.AddWithValue("@Code", code);
-                    cmd.Parameters.AddWithValue("@Expiry", DateTime.UtcNow.AddMinutes(5));
-                    cmd.Parameters.AddWithValue("@Email", email);
-
-                    int rows = await cmd.ExecuteNonQueryAsync();
-
-                    if (rows == 0)
+                int rowsAffected = await conn.ExecuteScalarAsync<int>(
+                    "sp_UpdateResetOtp",
+                    new
                     {
-                        response.StatusCode = 404;
-                        response.Message = "User not found.";
-                        return response;
-                    }
+                        Email = email,
+                        Code = code,
+                        Expiry = DateTime.UtcNow.AddMinutes(5)
+                    },
+                    commandType: CommandType.StoredProcedure
+                );
+
+                if (rowsAffected == 0)
+                {
+                    response.StatusCode = 404;
+                    response.Message = "User not found.";
+                    return response;
                 }
 
                 await ResetPassSendOtpEmail(email, code);
@@ -399,12 +339,12 @@ namespace CarRental.Server
             catch (Exception ex)
             {
                 response.StatusCode = 500;
-                response.Message = ex.Message;
+                response.Message = "Error: " + ex.Message;
             }
             finally
             {
-                await conn.CloseAsync();
-
+                if (conn.State == ConnectionState.Open)
+                    await conn.CloseAsync();
             }
             return response;
         }
@@ -415,80 +355,45 @@ namespace CarRental.Server
 
             try
             {
-                await conn.OpenAsync();
-
-                string query = @"SELECT ResetToken, ResetTokenExpiry FROM Users WHERE Email = @Email";
-
-                using (SqlCommand cmd = new SqlCommand(query, conn))
+                if (string.IsNullOrWhiteSpace(newPassword) || newPassword.Length < 6)
                 {
-                    cmd.Parameters.AddWithValue("@Email", email);
+                    response.StatusCode = 400;
+                    response.Message = "Password must be at least 6 characters.";
+                    return response;
+                }
 
-                    var reader = await cmd.ExecuteReaderAsync();
+                if (conn.State == ConnectionState.Closed)
+                    await conn.OpenAsync();
 
-                    if (!reader.Read())
+                string hash = BCrypt.Net.BCrypt.HashPassword(newPassword);
+
+                var result = await conn.QueryFirstOrDefaultAsync<dynamic>(
+                    "sp_ResetUserPassword",
+                    new
                     {
-                        response.StatusCode = 404;
-                        response.Message = "User not found.";
-                        return response;
-                    }
+                        Email = email,
+                        Code = code,
+                        NewHash = hash,
+                        UpdatedAt = DateTime.UtcNow
+                    },
+                    commandType: CommandType.StoredProcedure
+                );
 
-                    string storedCode = reader["ResetToken"]?.ToString();
-                    DateTime expiry = reader["ResetTokenExpiry"] == DBNull.Value ?
-                        DateTime.MinValue :
-                        (DateTime)reader["ResetTokenExpiry"];
-
-                    if (DateTime.UtcNow > expiry)
-                    {
-                        reader.Close();
-                        response.StatusCode = 400;
-                        response.Message = "Reset token has expired.";
-                        return response;
-                    }
-
-                    if (storedCode != code)
-                    {
-                        reader.Close();
-                        response.StatusCode = 400;
-                        response.Message = "Invalid reset token.";
-                        return response;
-                    }
-
-                    reader.Close();
-
-                    if (string.IsNullOrWhiteSpace(newPassword) || newPassword.Length < 6)
-                    {
-                        response.StatusCode = 400;
-                        response.Message = "Password must be at least 6 characters.";
-                        return response;
-                    }
-
-                    string hash = BCrypt.Net.BCrypt.HashPassword(newPassword);
-
-                    string update = @"UPDATE Users 
-                        SET PasswordHash = @Hash, ResetToken = NULL, ResetTokenExpiry = NULL, UpdatedAt = @UpdatedAt 
-                        WHERE Email = @Email";
-
-                    using (SqlCommand updateCmd = new SqlCommand(update, conn))
-                    {
-                        updateCmd.Parameters.AddWithValue("@Hash", hash);
-                        updateCmd.Parameters.AddWithValue("@Email", email);
-                        updateCmd.Parameters.AddWithValue("@UpdatedAt", DateTime.UtcNow);
-
-                        await updateCmd.ExecuteNonQueryAsync();
-                    }
-
-                    response.StatusCode = 200;
-                    response.Message = "Password reset successfully.";
+                if (result != null)
+                {
+                    response.StatusCode = (int)result.StatusCode;
+                    response.Message = (string)result.Message;
                 }
             }
             catch (Exception ex)
             {
                 response.StatusCode = 500;
-                response.Message = ex.Message;
+                response.Message = "Error: " + ex.Message;
             }
             finally
             {
-                await conn.CloseAsync();
+                if (conn.State == ConnectionState.Open)
+                    await conn.CloseAsync();
             }
             return response;
         }
@@ -518,8 +423,9 @@ namespace CarRental.Server
         {
             var response = new ServiceResponse<UploadProfileResponse>();
 
-            try 
+            try
             {
+                // 1. Validation (File Check)
                 if (request.File == null || request.File.Length == 0)
                 {
                     response.StatusCode = 400;
@@ -527,6 +433,7 @@ namespace CarRental.Server
                     return response;
                 }
 
+                // 2. Format Check
                 var allowedTypes = new[] { "image/jpeg", "image/png", "image/jpg" };
                 if (!allowedTypes.Contains(request.File.ContentType))
                 {
@@ -535,6 +442,7 @@ namespace CarRental.Server
                     return response;
                 }
 
+                // 3. File Saving Logic
                 var uploadPath = Path.Combine(_env.WebRootPath, "upload");
                 if (!Directory.Exists(uploadPath))
                 {
@@ -551,32 +459,35 @@ namespace CarRental.Server
 
                 string imageUrl = $"/upload/{fileName}";
 
-                await conn.OpenAsync();
+                // 4. Dapper Database Update
+                if (conn.State == ConnectionState.Closed)
+                    await conn.OpenAsync();
 
-                string query = "UPDATE Users Set ProfileImage = @Image Where Id = @Id";
+                // One-liner na lang ang pag-update sa Database
+                await conn.ExecuteAsync(
+                    "sp_UpdateUserProfileImage",
+                    new { Id = request.UserId, Image = imageUrl },
+                    commandType: CommandType.StoredProcedure
+                );
 
-                using (SqlCommand cmd = new SqlCommand(query, conn))
-                {
-                    cmd.Parameters.AddWithValue("@Image", imageUrl);
-                    cmd.Parameters.AddWithValue("@Id", request.UserId);
-
-                    await cmd.ExecuteNonQueryAsync();
-                }
+                // 5. Success Response
                 response.StatusCode = 200;
                 response.Message = "Profile Uploaded Successfully";
                 response.Data = new UploadProfileResponse
                 {
                     ImageUrl = imageUrl
                 };
-            } catch (Exception ex)
+            }
+            catch (Exception ex)
             {
                 response.StatusCode = 500;
-                response.Message = ex.Message;
+                response.Message = "Error: " + ex.Message;
             }
-
             finally
             {
-                await conn.CloseAsync();
+                // 6. Close Connection
+                if (conn.State == ConnectionState.Open)
+                    await conn.CloseAsync();
             }
             return response;
         }
@@ -586,190 +497,169 @@ namespace CarRental.Server
             var response = new ServiceResponse<object>();
             try
             {
-                await conn.OpenAsync();
+                if (conn.State == ConnectionState.Closed) await conn.OpenAsync();
 
-                string verifyQuery = @"SELECT VerificationCode, VerificationExpiry, PasswordHash FROM Users WHERE Email = @Email";
-                string storedHash = "";
+                var user = await conn.QueryFirstOrDefaultAsync<dynamic>(
+                    "sp_GetVerifyDetails",
+                    new { Email = request.Email },
+                    commandType: CommandType.StoredProcedure
+                );
 
-                using (SqlCommand cmd = new SqlCommand(verifyQuery, conn))
+                if (user == null)
                 {
-                    cmd.Parameters.AddWithValue("@Email", request.Email);
-                    using (var reader = await cmd.ExecuteReaderAsync())
-                    {
-                        if (!reader.Read())
-                        {
-                            response.StatusCode = 404; response.Message = "User not found."; return response;
-                        }
-
-                        string storedCode = reader["VerificationCode"]?.ToString();
-                        DateTime expiry = reader["VerificationExpiry"] == DBNull.Value ? DateTime.MinValue : (DateTime)reader["VerificationExpiry"];
-                        storedHash = reader["PasswordHash"]?.ToString(); 
-
-                        if (storedCode != request.OtpCode)
-                        {
-                            response.StatusCode = 400; response.Message = "Invalid OTP."; return response;
-                        }
-                        if (DateTime.UtcNow > expiry)
-                        {
-                            response.StatusCode = 400; response.Message = "OTP has expired. Please request a new one."; return response;
-                        }
-                    }
+                    return new ServiceResponse<object> { StatusCode = 404, Message = "User not found." };
                 }
 
-                var updateClauses = new List<string>();
-                using (SqlCommand updateCmd = new SqlCommand())
+                if (user.VerificationCode != request.OtpCode)
                 {
-                    updateCmd.Connection = conn;
-
-                    if (!string.IsNullOrWhiteSpace(request.FirstName))
-                    {
-                        updateClauses.Add("FirstName = @FN");
-                        updateCmd.Parameters.AddWithValue("@FN", request.FirstName);
-                    }
-
-                    if (!string.IsNullOrWhiteSpace(request.LastName))
-                    {
-                        updateClauses.Add("LastName = @LN");
-                        updateCmd.Parameters.AddWithValue("@LN", request.LastName);
-                    }
-
-                    if (!string.IsNullOrWhiteSpace(request.NewPassword))
-                    {
-                        if (string.IsNullOrWhiteSpace(request.CurrentPassword))
-                        {
-                            response.StatusCode = 400; response.Message = "Please enter your current password to set a new one."; return response;
-                        }
-
-                        if (!BCrypt.Net.BCrypt.Verify(request.CurrentPassword, storedHash))
-                        {
-                            response.StatusCode = 400; response.Message = "Incorrect current password. Cannot change password."; return response;
-                        }
-
-                        updateClauses.Add("PasswordHash = @Hash");
-                        updateCmd.Parameters.AddWithValue("@Hash", BCrypt.Net.BCrypt.HashPassword(request.NewPassword));
-                    }
-
-                    if (updateClauses.Count == 0)
-                    {
-                        response.StatusCode = 400; response.Message = "No changes requested."; return response;
-                    }
-
-                    updateClauses.Add("VerificationCode = NULL");
-                    updateClauses.Add("VerificationExpiry = NULL");
-
-                    string updateQuery = $"UPDATE Users SET {string.Join(", ", updateClauses)} WHERE Id = @Id";
-
-                    updateCmd.CommandText = updateQuery;
-                    updateCmd.Parameters.AddWithValue("@Id", request.UserId);
-
-                    await updateCmd.ExecuteNonQueryAsync();
+                    return new ServiceResponse<object> { StatusCode = 400, Message = "Invalid OTP." };
                 }
+
+                if (DateTime.UtcNow > (DateTime)user.VerificationExpiry)
+                {
+                    return new ServiceResponse<object> { StatusCode = 400, Message = "OTP has expired." };
+                }
+
+                string newHash = null;
+                if (!string.IsNullOrWhiteSpace(request.NewPassword))
+                {
+                    if (string.IsNullOrWhiteSpace(request.CurrentPassword))
+                    {
+                        return new ServiceResponse<object> { StatusCode = 400, Message = "Please enter current password." };
+                    }
+
+                    if (!BCrypt.Net.BCrypt.Verify(request.CurrentPassword, (string)user.PasswordHash))
+                    {
+                        return new ServiceResponse<object> { StatusCode = 400, Message = "Incorrect current password." };
+                    }
+
+                    newHash = BCrypt.Net.BCrypt.HashPassword(request.NewPassword);
+                }
+
+                await conn.ExecuteAsync("sp_UpdateUserProfileDetails", new
+                {
+                    UserId = request.UserId,
+                    FirstName = string.IsNullOrWhiteSpace(request.FirstName) ? null : request.FirstName,
+                    LastName = string.IsNullOrWhiteSpace(request.LastName) ? null : request.LastName,
+                    PasswordHash = newHash
+                }, commandType: CommandType.StoredProcedure);
 
                 response.StatusCode = 200;
                 response.Message = "Profile updated successfully.";
             }
             catch (Exception ex)
             {
-                response.StatusCode = 500; response.Message = ex.Message;
+                response.StatusCode = 500;
+                response.Message = "Error: " + ex.Message;
             }
             finally
             {
-                await conn.CloseAsync();
+                if (conn.State == ConnectionState.Open) await conn.CloseAsync();
             }
             return response;
         }
+
         public async Task<ServiceResponse<List<CustomerDto>>> GetAllCustomers()
         {
             var response = new ServiceResponse<List<CustomerDto>>();
-            var customers = new List<CustomerDto>();
 
-            string query = @"
-        SELECT u.Id, u.FirstName, u.LastName, u.Email, u.ProfileImage, u.IsVerified, u.IsBlocked,
-               (SELECT COUNT(*) FROM Rentals r WHERE r.UserId = u.Id AND r.Status = 'Returned') AS TotalRentals
-        FROM Users u
-        WHERE u.Role != 'Admin'"; 
-
-            using (SqlCommand cmd = new SqlCommand(query, conn))
+            try
             {
-                await conn.OpenAsync();
-                using (SqlDataReader reader = await cmd.ExecuteReaderAsync())
-                {
-                    while (await reader.ReadAsync())
-                    {
-                        customers.Add(new CustomerDto
-                        {
-                            Id = Convert.ToInt32(reader["Id"]),
-                            FirstName = reader["FirstName"].ToString()!,
-                            LastName = reader["LastName"].ToString()!,
-                            Email = reader["Email"].ToString()!,
-                            ProfileImage = reader["ProfileImage"] != DBNull.Value ? reader["ProfileImage"].ToString()! : null,
-                            IsVerified = Convert.ToBoolean(reader["IsVerified"]),
-                            IsBlocked = Convert.ToBoolean(reader["IsBlocked"]),
-                            TotalSuccessfulRentals = Convert.ToInt32(reader["TotalRentals"])
-                        });
-                    }
-                }
-                await conn.CloseAsync();
+                if (conn.State == ConnectionState.Closed)
+                    await conn.OpenAsync();
+
+                var customers = await conn.QueryAsync<CustomerDto>(
+                    "sp_GetAllCustomers",
+                    commandType: CommandType.StoredProcedure
+                );
+
+                response.Data = customers.ToList();
+                response.StatusCode = 200;
+                response.Message = "Customers retrieved successfully.";
             }
-            response.Data = customers;
-            response.StatusCode = 200;
+            catch (Exception ex)
+            {
+                response.StatusCode = 500;
+                response.Message = "Error: " + ex.Message;
+            }
+            finally
+            {
+                if (conn.State == ConnectionState.Open)
+                    await conn.CloseAsync();
+            }
+
             return response;
         }
 
         public async Task<ServiceResponse<string>> ToggleBlockUser(int userId, bool isBlocked)
         {
             var response = new ServiceResponse<string>();
-            string query = "UPDATE Users SET IsBlocked = @IsBlocked WHERE Id = @Id AND Role != 'Admin'";
 
-            using (SqlCommand cmd = new SqlCommand(query, conn))
+            try
             {
-                cmd.Parameters.AddWithValue("@IsBlocked", isBlocked);
-                cmd.Parameters.AddWithValue("@Id", userId);
+                if (conn.State == ConnectionState.Closed)
+                    await conn.OpenAsync();
 
-                await conn.OpenAsync();
-                await cmd.ExecuteNonQueryAsync();
-                await conn.CloseAsync();
+                int rowsAffected = await conn.ExecuteScalarAsync<int>(
+                    "sp_ToggleBlockUser",
+                    new { Id = userId, IsBlocked = isBlocked },
+                    commandType: CommandType.StoredProcedure
+                );
+
+                if (rowsAffected == 0)
+                {
+                    response.StatusCode = 404;
+                    response.Message = "User not found or cannot block an Admin.";
+                    return response;
+                }
+
+                response.StatusCode = 200;
+                response.Message = isBlocked ? "User blocked successfully." : "User unblocked successfully.";
+            }
+            catch (Exception ex)
+            {
+                response.StatusCode = 500;
+                response.Message = "Error: " + ex.Message;
+            }
+            finally
+            {
+                if (conn.State == ConnectionState.Open)
+                    await conn.CloseAsync();
             }
 
-            response.StatusCode = 200;
-            response.Message = isBlocked ? "User blocked successfully." : "User unblocked successfully.";
             return response;
         }
 
         public async Task<ServiceResponse<List<CustomerRentalHistoryDto>>> GetCustomerRentalHistory(int userId)
         {
             var response = new ServiceResponse<List<CustomerRentalHistoryDto>>();
-            var history = new List<CustomerRentalHistoryDto>();
 
-            string query = @"
-        SELECT r.RentalID, c.CarName, c.CarImage, r.StartDate, r.EndDate, r.TotalPrice
-        FROM Rentals r
-        JOIN Cars c ON r.CarID = c.CarId
-        WHERE r.UserId = @UserId AND r.Status = 'Returned'";
-
-            using (SqlCommand cmd = new SqlCommand(query, conn))
+            try
             {
-                cmd.Parameters.AddWithValue("@UserId", userId);
-                await conn.OpenAsync();
-                using (SqlDataReader reader = await cmd.ExecuteReaderAsync())
-                {
-                    while (await reader.ReadAsync())
-                    {
-                        history.Add(new CustomerRentalHistoryDto
-                        {
-                            RentalId = Convert.ToInt32(reader["RentalID"]),
-                            CarName = reader["CarName"].ToString()!,
-                            CarImage = reader["CarImage"] != DBNull.Value ? reader["CarImage"].ToString()! : null,
-                            StartDate = Convert.ToDateTime(reader["StartDate"]),
-                            EndDate = Convert.ToDateTime(reader["EndDate"]),
-                            TotalAmount = Convert.ToDecimal(reader["TotalPrice"])
-                        });
-                    }
-                }
-                await conn.CloseAsync();
+                if (conn.State == ConnectionState.Closed)
+                    await conn.OpenAsync();
+
+                var history = await conn.QueryAsync<CustomerRentalHistoryDto>(
+                    "sp_GetCustomerRentalHistory",
+                    new { UserId = userId },
+                    commandType: CommandType.StoredProcedure
+                );
+
+                response.Data = history.ToList();
+                response.StatusCode = 200;
+                response.Message = "Rental history retrieved successfully.";
             }
-            response.Data = history;
-            response.StatusCode = 200;
+            catch (Exception ex)
+            {
+                response.StatusCode = 500;
+                response.Message = "Error: " + ex.Message;
+            }
+            finally
+            {
+                if (conn.State == ConnectionState.Open)
+                    await conn.CloseAsync();
+            }
+
             return response;
         }
 

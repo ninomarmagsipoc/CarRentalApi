@@ -1,9 +1,11 @@
 ﻿using CarRental.IRepository;
 using CarRental.Model;
 using CarRental.Model.Response;
-using System.Data.SqlClient;
+using Dapper;
 using Microsoft.AspNetCore.Hosting;
 using Microsoft.AspNetCore.Http;
+using System.Data;
+using System.Data.SqlClient;
 using System.IO;
 
 namespace CarRental.Server
@@ -28,180 +30,58 @@ namespace CarRental.Server
         public async Task<ServiceResponse<Rental>> CreateRental(RentalRequest request)
         {
             var response = new ServiceResponse<Rental>();
-
             try
             {
-                DateTime today = DateTime.Today;
-
-                if (request.StartDate.Date < today)
-                {
-                    response.StatusCode = 400;
-                    response.Message = "Start Date cannot be in the past.";
-                    return response;
-                }
+                if (request.StartDate.Date < DateTime.Today)
+                    return new ServiceResponse<Rental> { StatusCode = 400, Message = "Start Date cannot be in the past." };
 
                 if (request.EndDate.Date < request.StartDate.Date)
-                {
-                    response.StatusCode = 400;
-                    response.Message = "End Date cannot be earlier than Start Date";
-                    return response;
-                }
-
-                if (conn.State == System.Data.ConnectionState.Closed)
-                {
-                    await conn.OpenAsync();
-                }
-
-                string maintQuery = "SELECT MaintenanceMonth FROM Cars WHERE CarID = @CarID";
-                using (var cmd = new SqlCommand(maintQuery, conn))
-                {
-                    cmd.Parameters.AddWithValue("@CarID", request.CarID);
-                    var maintObj = await cmd.ExecuteScalarAsync();
-
-                    if (maintObj != null && maintObj != DBNull.Value && !string.IsNullOrWhiteSpace(maintObj.ToString()))
-                    {
-                        string maintMonthString = maintObj.ToString().Trim();
-
-                        if (DateTime.TryParseExact(maintMonthString, "MMMM yyyy", new System.Globalization.CultureInfo("en-US"), System.Globalization.DateTimeStyles.None, out DateTime maintDate))
-                        {
-                           
-                            DateTime maintStart = new DateTime(maintDate.Year, maintDate.Month, 1); 
-                            DateTime maintEnd = maintStart.AddMonths(1).AddDays(-1);               
-
-                            if (request.StartDate.Date <= maintEnd && request.EndDate.Date >= maintStart)
-                            {
-                                response.StatusCode = 400;
-                                response.Message = $"Cannot be booked. The vehicle is under maintenance for the entire month of {maintMonthString}.";
-                                return response;
-                            }
-                        }
-                        else
-                        {
-                           
-                            string maintMonth = maintMonthString.ToLower();
-                            string reqStartMonth = request.StartDate.ToString("MMMM yyyy", new System.Globalization.CultureInfo("en-US")).ToLower();
-                            string reqEndMonth = request.EndDate.ToString("MMMM yyyy", new System.Globalization.CultureInfo("en-US")).ToLower();
-
-                            if (maintMonth == reqStartMonth || maintMonth == reqEndMonth)
-                            {
-                                response.StatusCode = 400;
-                                response.Message = $"Cannot be booked. The vehicle is under maintenance for the month of {maintMonthString}.";
-                                return response;
-                            }
-                        }
-                    }
-                }
-
-                string checkQuery = @"
-            SELECT COUNT(*) FROM Rentals 
-            WHERE CarID = @CarID 
-            AND Status NOT IN ('Cancelled', 'Returned', 'Rejected') 
-            AND (
-                DATEADD(day, -3, StartDate) <= @EndDate 
-                AND 
-                DATEADD(day, 3, EndDate) >= @StartDate
-            )";
-
-                using (SqlCommand checkCmd = new SqlCommand(checkQuery, conn))
-                {
-                    checkCmd.Parameters.AddWithValue("@CarID", request.CarID);
-                    checkCmd.Parameters.AddWithValue("@StartDate", request.StartDate.Date);
-                    checkCmd.Parameters.AddWithValue("@EndDate", request.EndDate.Date);
-
-                    int count = (int)await checkCmd.ExecuteScalarAsync();
-
-                    if (count > 0)
-                    {
-                        response.StatusCode = 400;
-                        response.Message = "Car is Already rented for selected dates.";
-                        return response;
-                    }
-                }
-
-                decimal pricepPerDay = 0;
-                string priceQuery = "SELECT PricePerDay FROM Cars WHERE CarID = @CarID";
-
-                using (SqlCommand cmd = new SqlCommand(priceQuery, conn))
-                {
-                    cmd.Parameters.AddWithValue("@CarID", request.CarID);
-                    var result = await cmd.ExecuteScalarAsync();
-
-                    if (result == null)
-                    {
-                        response.StatusCode = 404;
-                        response.Message = "Car Not Found";
-                        return response;
-                    }
-
-                    pricepPerDay = Convert.ToDecimal(result);
-                }
-
-                int totalDays = (request.EndDate - request.StartDate).Days;
-                if (totalDays <= 0)
-                {
-                    totalDays = 1;
-                }
-
-                decimal totalPrice = totalDays * pricepPerDay;
+                    return new ServiceResponse<Rental> { StatusCode = 400, Message = "End Date cannot be earlier than Start Date." };
 
                 string licenseFileName = null;
                 if (request.DriverLicense != null)
                 {
                     var uploadsFolder = Path.Combine(_env.WebRootPath, "uploads", "licenses");
                     if (!Directory.Exists(uploadsFolder)) Directory.CreateDirectory(uploadsFolder);
-
-                    licenseFileName = Guid.NewGuid().ToString() + "_" + request.DriverLicense.FileName;
-                    var filePath = Path.Combine(uploadsFolder, licenseFileName);
-
-                    using (var stream = new FileStream(filePath, FileMode.Create))
+                    licenseFileName = $"{Guid.NewGuid()}_{request.DriverLicense.FileName}";
+                    using (var stream = new FileStream(Path.Combine(uploadsFolder, licenseFileName), FileMode.Create))
                     {
                         await request.DriverLicense.CopyToAsync(stream);
                     }
                 }
 
-                string insertQuery = @"
-            INSERT INTO Rentals (UserID, CarID, StartDate, EndDate, TotalPrice, FullName, ContactNumber, PickupLocation, DriverLicense, Status) 
-            OUTPUT INSERTED.* VALUES (@UserId, @CarId, @StartDate, @EndDate, @TotalPrice, @FullName, @ContactNumber, @PickupLocation, @DriverLicense, 'Pending')";
+                if (conn.State == ConnectionState.Closed)
+                    await conn.OpenAsync();
 
-                using (SqlCommand cmd = new SqlCommand(insertQuery, conn))
+                var result = await conn.QueryFirstOrDefaultAsync<dynamic>("sp_CreateRental", new
                 {
-                    cmd.Parameters.AddWithValue("@UserID", request.UserID);
-                    cmd.Parameters.AddWithValue("@CarID", request.CarID);
-                    cmd.Parameters.AddWithValue("@StartDate", request.StartDate);
-                    cmd.Parameters.AddWithValue("@EndDate", request.EndDate);
-                    cmd.Parameters.AddWithValue("@TotalPrice", totalPrice);
+                    request.UserID,
+                    request.CarID,
+                    request.StartDate,
+                    request.EndDate,
+                    request.FullName,
+                    request.ContactNumber,
+                    request.PickupLocation,
+                    DriverLicense = licenseFileName
+                }, commandType: CommandType.StoredProcedure);
 
-                    cmd.Parameters.AddWithValue("@FullName", (object)request.FullName ?? DBNull.Value);
-                    cmd.Parameters.AddWithValue("@ContactNumber", (object)request.ContactNumber ?? DBNull.Value);
-                    cmd.Parameters.AddWithValue("@PickupLocation", (object)request.PickupLocation ?? DBNull.Value);
-                    cmd.Parameters.AddWithValue("@DriverLicense", (object)licenseFileName ?? DBNull.Value);
-
-                    using (SqlDataReader reader = await cmd.ExecuteReaderAsync())
+                if (result != null && result.StatusCode == 200)
+                {
+                    response.StatusCode = 200;
+                    response.Message = result.Message;
+                    response.Data = new Rental
                     {
-                        if (await reader.ReadAsync())
-                        {
-                            response.Data = new Rental
-                            {
-                                RentalID = Convert.ToInt32(reader["RentalID"]),
-                                UserID = Convert.ToInt32(reader["UserID"]),
-                                CarID = Convert.ToInt32(reader["CarID"]),
-                                StartDate = Convert.ToDateTime(reader["StartDate"]),
-                                EndDate = Convert.ToDateTime(reader["EndDate"]),
-                                TotalDays = Convert.ToInt32(reader["TotalDays"] != DBNull.Value ? reader["TotalDays"] : totalDays),
-                                TotalPrice = Convert.ToDecimal(reader["TotalPrice"]),
-                                Status = reader["Status"].ToString(),
-                                FullName = reader["FullName"]?.ToString(),
-                                ContactNumber = reader["ContactNumber"]?.ToString(),
-                                PickupLocation = reader["PickupLocation"]?.ToString(),
-                                DriverLicense = reader["DriverLicense"]?.ToString(),
-                                CreatedAt = Convert.ToDateTime(reader["CreatedAt"]),
-                                UpdatedAt = Convert.ToDateTime(reader["UpdatedAt"])
-                            };
-
-                            response.StatusCode = 200;
-                            response.Message = "Rental Created SuccessFully";
-                        }
-                    }
+                        RentalID = result.RentalID,
+                        UserID = result.UserID,
+                        TotalPrice = result.TotalPrice,
+                        Status = result.Status,
+                        CreatedAt = result.CreatedAt
+                    };
+                }
+                else
+                {
+                    response.StatusCode = result?.StatusCode ?? 400;
+                    response.Message = result?.Message ?? "Booking Failed";
                 }
             }
             catch (Exception ex)
@@ -211,129 +91,81 @@ namespace CarRental.Server
             }
             finally
             {
-                if (conn.State == System.Data.ConnectionState.Open)
-                {
-                    await conn.CloseAsync();
-                }
+                if (conn.State == ConnectionState.Open) await conn.CloseAsync();
             }
-
             return response;
         }
 
         public async Task<ServiceResponse<List<Rental>>> GetRentals()
         {
             var response = new ServiceResponse<List<Rental>>();
-            var list = new List<Rental>();
 
-            await conn.OpenAsync();
-
-            string query = @"
-                 SELECT r.*, 
-                        CONCAT(u.FirstName, ' ', u.LastName) AS UserName,
-                        c.CarName as CarName,
-                        r.DriverLicense,
-                        (SELECT TOP 1 PaymentID FROM Payment p WHERE p.RentalID = r.RentalID ORDER BY p.CreatedAt DESC) AS PaymentID     
-                 FROM Rentals r     
-                 LEFT JOIN Users u ON r.UserID = u.Id
-                 LEFT JOIN Cars c ON r.CarID = c.CarID
-                 WHERE r.Status != 'Pending'     
-                 ORDER BY r.CreatedAt DESC";
-
-            using (SqlCommand cmd = new SqlCommand(query, conn))
-            using (SqlDataReader reader = await cmd.ExecuteReaderAsync())
+            try
             {
-                while (await reader.ReadAsync())
-                {
-                    list.Add(new Rental
-                    {
-                        RentalID = Convert.ToInt32(reader["RentalID"]),
-                        UserID = Convert.ToInt32(reader["UserID"]),
-                        UserName = reader["UserName"] != DBNull.Value ? reader["UserName"].ToString() : "Unknown User",
-                        CarName = reader["CarName"] != DBNull.Value ? reader["CarName"].ToString() : "Unknown CarName",
-                        CarID = Convert.ToInt32(reader["CarID"]),
-                        StartDate = Convert.ToDateTime(reader["StartDate"]),
-                        EndDate = Convert.ToDateTime(reader["EndDate"]),
-                        TotalDays = Convert.ToInt32(reader["TotalDays"]),
-                        TotalPrice = Convert.ToDecimal(reader["TotalPrice"]),
-                        Status = reader["Status"].ToString(),
-                        FullName = reader["FullName"] != DBNull.Value ? reader["FullName"].ToString() : null,
-                        ContactNumber = reader["ContactNumber"] != DBNull.Value ? reader["ContactNumber"].ToString() : null,
-                        PickupLocation = reader["PickupLocation"] != DBNull.Value ? reader["PickupLocation"].ToString() : null,
-                        DriverLicense = reader["DriverLicense"]?.ToString(),
-                        CreatedAt = Convert.ToDateTime(reader["CreatedAt"]),
-                        UpdatedAt = reader["UpdatedAt"] != DBNull.Value ? Convert.ToDateTime(reader["UpdatedAt"]) : DateTime.MinValue,
-                        PaymentID = reader["PaymentID"] != DBNull.Value ? Convert.ToInt32(reader["PaymentID"]) : (int?)null,
-                    });
-                }
+                if (conn.State == ConnectionState.Closed)
+                    await conn.OpenAsync();
+
+                var rentals = await conn.QueryAsync<Rental>(
+                    "rent_GetRentals",
+                    commandType: CommandType.StoredProcedure
+                );
+
+                response.Data = rentals.ToList();
+                response.StatusCode = 200;
+                response.Message = "Rentals retrieved successfully.";
+            }
+            catch (Exception ex)
+            {
+                response.StatusCode = 500;
+                response.Message = "Error fetching rentals: " + ex.Message;
+            }
+            finally
+            {
+                if (conn.State == ConnectionState.Open)
+                    await conn.CloseAsync();
             }
 
-            response.Data = list;
             return response;
         }
+
         public async Task<ServiceResponse<Rental>> GetRentalById(int id)
         {
             var response = new ServiceResponse<Rental>();
 
-            await conn.OpenAsync();
-
-            string query = @"
-             SELECT r.*, 
-               CONCAT(u.FirstName, ' ', u.LastName) AS UserName,
-               c.CarName, 
-               p.PaymentID,
-               p.Amount,
-               r.IsDeleted,
-               p.PayMongoRef
-            FROM Rentals r
-            LEFT JOIN Users u ON r.UserID = u.Id
-            LEFT JOIN Cars c ON r.CarID = c.CarID
-            OUTER APPLY (
-                SELECT TOP 1 PaymentID, Amount, PayMongoRef 
-                FROM Payment 
-                WHERE RentalID = r.RentalID 
-                ORDER BY CreatedAt DESC
-            ) p
-            WHERE r.RentalID = @Id";
-
-            using (SqlCommand cmd = new SqlCommand(query, conn))
+            try
             {
-                cmd.Parameters.AddWithValue("@Id", id);
+                if (conn.State == ConnectionState.Closed)
+                    await conn.OpenAsync();
 
-                using (SqlDataReader reader = await cmd.ExecuteReaderAsync())
+                var rental = await conn.QueryFirstOrDefaultAsync<Rental>(
+                    "rent_GetRentalById",
+                    new { Id = id },
+                    commandType: CommandType.StoredProcedure
+                );
+
+                if (rental != null)
                 {
-                    if(await reader.ReadAsync())
-                    {
-                        response.StatusCode = 200;
-                        response.Data = new Rental 
-                        {
-                            RentalID = Convert.ToInt32(reader["RentalID"]),
-                            UserID = Convert.ToInt32(reader["UserID"]),
-                            CarID = Convert.ToInt32(reader["CarID"]),
-                            CarName = reader["CarName"] != DBNull.Value ? reader["CarName"].ToString() : null,
-                            StartDate = Convert.ToDateTime(reader["StartDate"]),
-                            EndDate = Convert.ToDateTime(reader["EndDate"]),
-                            TotalDays = Convert.ToInt32(reader["TotalDays"]),
-                            TotalPrice = Convert.ToDecimal(reader["TotalPrice"]),
-                            Status = reader["Status"].ToString(),
-                            FullName = reader["FullName"] != DBNull.Value ? reader["FullName"].ToString() : null,
-                            ContactNumber = reader["ContactNumber"] != DBNull.Value ? reader["ContactNumber"].ToString() : null,
-                            PickupLocation = reader["PickupLocation"] != DBNull.Value ? reader["PickupLocation"].ToString() : null,
-                            DriverLicense = reader["DriverLicense"]?.ToString(),
-                            CreatedAt = Convert.ToDateTime(reader["CreatedAt"]),
-                            UpdatedAt = Convert.ToDateTime(reader["UpdatedAt"]),
-                            Amount = reader["Amount"] != DBNull.Value ? Convert.ToDecimal(reader["Amount"]) : 0,
-                            PaymentReference = reader["PayMongoRef"] != DBNull.Value ? reader["PayMongoRef"].ToString() : "N/A",
-                            IsDeleted = reader["IsDeleted"] != DBNull.Value && Convert.ToBoolean(reader["IsDeleted"])
-                        };
-                    }
-
-                    else
-                    {
-                        response.StatusCode = 404;
-                        response.Message = "Rental not found";
-                    }
+                    response.Data = rental;
+                    response.StatusCode = 200;
+                    response.Message = "Rental found.";
+                }
+                else
+                {
+                    response.StatusCode = 404;
+                    response.Message = "Rental not found.";
                 }
             }
+            catch (Exception ex)
+            {
+                response.StatusCode = 500;
+                response.Message = "Error: " + ex.Message;
+            }
+            finally
+            {
+                if (conn.State == ConnectionState.Open)
+                    await conn.CloseAsync();
+            }
+
             return response;
         }
 
@@ -343,87 +175,36 @@ namespace CarRental.Server
 
             try
             {
-                if (conn.State != System.Data.ConnectionState.Open)
+                if (conn.State == ConnectionState.Closed) await conn.OpenAsync();
+
+                var info = await conn.QueryFirstOrDefaultAsync<dynamic>(
+                    "rent_ReviewBooking",
+                    new { RentalID = rentalId, Status = newStatus },
+                    commandType: CommandType.StoredProcedure
+                );
+
+                if (info != null)
                 {
-                    await conn.OpenAsync();
-                }
-
-                string query = @"    
-                    UPDATE Rentals 
-                    SET Status = @Status, UpdatedAt = GETDATE()    
-                    OUTPUT INSERTED.UserID    
-                    WHERE RentalID = @RentalID";
-
-                int? userId = null;
-                using (SqlCommand cmd = new SqlCommand(query, conn))
-                {
-                    cmd.Parameters.AddWithValue("@Status", newStatus);
-                    cmd.Parameters.AddWithValue("@RentalID", rentalId);
-
-                    var result = await cmd.ExecuteScalarAsync();
-                    if (result != null) userId = Convert.ToInt32(result);
-                }
-
-                if (userId.HasValue)
-                {
-                    string userEmail = "";
-                    string emailQuery = "SELECT Email FROM Users WHERE Id = @UserID";
-                    using (SqlCommand emailCmd = new SqlCommand(emailQuery, conn))
-                    {
-                        emailCmd.Parameters.AddWithValue("@UserID", userId.Value);
-                        var emailResult = await emailCmd.ExecuteScalarAsync();
-                        if (emailResult != null && emailResult != DBNull.Value)
-                        {
-                            userEmail = emailResult.ToString();
-                        }
-                    }
-
+                    int userId = info.UserID;
+                    string userEmail = info.Email;
                     string notificationMessage = string.Empty;
                     string emailSubject = "Rental Update";
 
                     if (newStatus == "Approved")
                     {
-                        decimal remainingBalance = 0;
-
-                        string balanceQuery = @"SELECT TOP 1 RemainingBalance 
-                                        FROM Payment 
-                                        WHERE RentalID = @RentalID 
-                                        ORDER BY CreatedAt DESC";
-
-                        using (SqlCommand balanceCmd = new SqlCommand(balanceQuery, conn))
-                        {
-                            balanceCmd.Parameters.AddWithValue("@RentalID", rentalId);
-                            var balanceResult = await balanceCmd.ExecuteScalarAsync();
-
-                            if (balanceResult != null && balanceResult != DBNull.Value)
-                            {
-                                remainingBalance = Convert.ToDecimal(balanceResult);
-                            }
-                        }
-
-                        notificationMessage = $"Your rental is approved! Please print this Agreement Paper and present it upon pick-up.";
-
-                        emailSubject = "Rental Approved - Action Required"; 
+                        notificationMessage = "Your rental is approved! Please print this Agreement Paper and present it upon pick-up.";
+                        emailSubject = "Rental Approved - Action Required";
                     }
                     else if (newStatus == "Refund Required")
                     {
-                        
                         notificationMessage = "Your rental request has been rejected and your down payment will be refunded.";
-                        emailSubject = "Rental Update - Refund Processing"; 
-
-                        
-                        if (!string.IsNullOrEmpty(reason))
-                        {
-                            notificationMessage += $" Reason: {reason}";
-                        }
+                        if (!string.IsNullOrEmpty(reason)) notificationMessage += $" Reason: {reason}";
+                        emailSubject = "Rental Update - Refund Processing";
                     }
 
                     if (!string.IsNullOrEmpty(notificationMessage))
                     {
-                       
-                        await _notificationRepo.CreateNotification(userId.Value, rentalId, notificationMessage);
-
-                        
+                        await _notificationRepo.CreateNotification(userId, rentalId, notificationMessage);
                         if (!string.IsNullOrEmpty(userEmail))
                         {
                             await _emailService.SendEmailAsync(userEmail, emailSubject, notificationMessage);
@@ -445,10 +226,8 @@ namespace CarRental.Server
                 response.StatusCode = 500;
                 response.Message = ex.Message;
             }
-            finally
-            {
-                await conn.CloseAsync();
-            }
+            finally { await conn.CloseAsync(); }
+
             return response;
         }
 
@@ -457,52 +236,29 @@ namespace CarRental.Server
             var response = new ServiceResponse<bool>();
             try
             {
-                if (conn.State != System.Data.ConnectionState.Open)
+                if (conn.State == ConnectionState.Closed) await conn.OpenAsync();
+
+                var overdueRentals = await conn.QueryAsync<dynamic>(
+                    "rent_CheckAndMarkOverdueRentals",
+                    commandType: CommandType.StoredProcedure
+                );
+
+                var list = overdueRentals.ToList();
+
+                if (list.Count > 0)
                 {
-                    await conn.OpenAsync();
-                }
+                    string message = "Your rental is overdue. Please return the car immediately to avoid penalties.";
 
-                const string findQuery = @"
-                    SELECT r.RentalID, r.UserID, u.Email 
-                    FROM Rentals r 
-                    INNER JOIN Users u ON r.UserID = u.Id 
-                    WHERE r.Status = 'Rented' AND r.EndDate < GETDATE()";
-
-                var overdueRentals = new List<(int RentalId, int UserId, string Email)>();
-
-                using (var cmd = new SqlCommand(findQuery, conn))
-                using (var reader = await cmd.ExecuteReaderAsync())
-                {
-                    while (await reader.ReadAsync())
+                    foreach (var rental in list)
                     {
-                        overdueRentals.Add((
-                            Convert.ToInt32(reader["RentalID"]),
-                            Convert.ToInt32(reader["UserID"]),
-                            reader["Email"].ToString()
-                        ));
-                    }
-                }
-
-                if (overdueRentals.Count > 0)
-                {
-                    foreach (var rental in overdueRentals)
-                    {
-                        const string updateQuery = "UPDATE Rentals SET Status = 'Overdue', UpdatedAt = GETDATE() WHERE RentalID = @RentalID";
-                        using (var cmd = new SqlCommand(updateQuery, conn))
-                        {
-                            cmd.Parameters.AddWithValue("@RentalID", rental.RentalId);
-                            await cmd.ExecuteNonQueryAsync();
-                        }
-
-                        string message = "Your rental is overdue. Please return the car immediately to avoid penalties.";
-                        await _notificationRepo.CreateNotification(rental.UserId, rental.RentalId, message);
-                        await _emailService.SendEmailAsync(rental.Email, "Rental Overdue Notice", message);
+                        await _notificationRepo.CreateNotification((int)rental.UserID, (int)rental.RentalID, message);
+                        await _emailService.SendEmailAsync((string)rental.Email, "Rental Overdue Notice", message);
                     }
                 }
 
                 response.StatusCode = 200;
                 response.Data = true;
-                response.Message = $"{overdueRentals.Count} rentals marked as overdue.";
+                response.Message = $"{list.Count} rentals marked as overdue.";
             }
             catch (Exception ex)
             {
@@ -511,7 +267,7 @@ namespace CarRental.Server
             }
             finally
             {
-                await conn.CloseAsync();
+                if (conn.State == ConnectionState.Open) await conn.CloseAsync();
             }
 
             return response;
@@ -522,137 +278,99 @@ namespace CarRental.Server
             var response = new ServiceResponse<object>();
             try
             {
-                if (conn.State != System.Data.ConnectionState.Open) await conn.OpenAsync();
+                if (conn.State == ConnectionState.Closed) await conn.OpenAsync();
 
-                DateTime endDate = DateTime.MinValue;
-                string status = "";
-                int userId = 0;
-                string userEmail = "";
-                decimal pricePerDay = 0;
+                var result = await conn.QueryFirstOrDefaultAsync<dynamic>(
+                    "rent_ReturnCar",
+                    new { RentalID = rentalId },
+                    commandType: CommandType.StoredProcedure
+                );
 
-                const string rentalQuery = @"
-                    SELECT r.EndDate, r.Status, r.UserID, u.Email, c.PricePerDay
-                    FROM Rentals r 
-                    INNER JOIN Users u ON r.UserID = u.Id 
-                    INNER JOIN Cars c ON r.CarID = c.CarID
-                    WHERE r.RentalID = @RentalID";
-
-                using (var cmd = new SqlCommand(rentalQuery, conn))
+                if (result != null && result.StatusCode == 200)
                 {
-                    cmd.Parameters.AddWithValue("@RentalID", rentalId);
-                    using var reader = await cmd.ExecuteReaderAsync();
-                    if (await reader.ReadAsync())
+                    decimal penaltyFee = (decimal)result.PenaltyFee;
+                    int userId = (int)result.UserID;
+                    string userEmail = (string)result.Email;
+
+                    string subject, body, notifMsg;
+
+                    if (penaltyFee > 0)
                     {
-                        endDate = Convert.ToDateTime(reader["EndDate"]);
-                        status = reader["Status"].ToString();
-                        userId = Convert.ToInt32(reader["UserID"]);
-                        userEmail = reader["Email"].ToString();
-                        pricePerDay = Convert.ToDecimal(reader["PricePerDay"]);
+                        subject = "Late Return Penalty - Action Required";
+                        body = $"You returned the car late. Please log in and pay the penalty fee of PHP {penaltyFee:N2} to close your rental.";
+                        notifMsg = $"You have a pending penalty of PHP {penaltyFee:N2} for late return. Please pay via your history.";
                     }
-                    else { response.StatusCode = 404; response.Message = "Rental not found."; return response; }
-                }
+                    else
+                    {
+                        subject = "Rental Completed";
+                        body = "Thank you for returning the car on time.";
+                        notifMsg = "Thank you for returning the car on time.";
+                    }
 
-                if (status == "Returned") { response.StatusCode = 400; response.Message = "Car is already returned."; return response; }
+                    await _notificationRepo.CreateNotification(userId, rentalId, notifMsg);
+                    await _emailService.SendEmailAsync(userEmail, subject, body);
 
-                //Calculate Penalty
-                int overdueDays = (DateTime.Now.Date - endDate.Date).Days;
-                decimal penaltyFee = overdueDays > 0 ? overdueDays * pricePerDay : 0;
-
-                string newStatus = penaltyFee > 0 ? "Pending Penalty" : "Returned";
-
-                //Update DB
-                const string updateQuery = "UPDATE Rentals SET Status = @Status, PenaltyFee = @PenaltyFee, UpdatedAt = GETDATE() WHERE RentalID = @RentalID";
-                using (var cmd = new SqlCommand(updateQuery, conn))
-                {
-                    cmd.Parameters.AddWithValue("@Status", newStatus);
-                    cmd.Parameters.AddWithValue("@PenaltyFee", penaltyFee);
-                    cmd.Parameters.AddWithValue("@RentalID", rentalId);
-                    await cmd.ExecuteNonQueryAsync();
-                }
-
-                //Handle Notifications
-                string subject, body;
-                if (penaltyFee > 0)
-                {
-                    subject = "Late Return Penalty - Action Required";
-                    body = $"You returned the car late. Please log in to your account and pay the penalty fee of PHP {penaltyFee:N2} to fully close your rental.";
-                    await _notificationRepo.CreateNotification(userId, rentalId, $"You have a pending penalty of PHP {penaltyFee:N2} for late return. Please pay via your history.");
+                    response.StatusCode = 200;
+                    response.Data = new { PenaltyFee = penaltyFee };
+                    response.Message = penaltyFee > 0 ? "Penalty applied. Waiting for user payment." : "Car returned successfully.";
                 }
                 else
                 {
-                    subject = "Rental Completed";
-                    body = "Thank you for returning the car on time.";
-                    await _notificationRepo.CreateNotification(userId, rentalId, "Thank you for returning the car on time.");
+                    response.StatusCode = result?.StatusCode ?? 404;
+                    response.Message = result?.Message ?? "Rental not found.";
                 }
-
-                await _emailService.SendEmailAsync(userEmail, subject, body);
-
-                response.StatusCode = 200;
-                response.Data = new { PenaltyFee = penaltyFee };
-                response.Message = penaltyFee > 0 ? "Penalty applied. Waiting for user payment." : "Car returned successfully.";
             }
-            catch (Exception ex) { response.StatusCode = 500; response.Message = ex.Message; }
+            catch (Exception ex)
+            {
+                response.StatusCode = 500;
+                response.Message = "Error: " + ex.Message;
+            }
             finally { await conn.CloseAsync(); }
 
             return response;
         }
+
         public async Task<ServiceResponse<bool>> RequestCancellation(int rentalId, int userId)
         {
             var response = new ServiceResponse<bool>();
             try
             {
+                if (conn.State == ConnectionState.Closed) await conn.OpenAsync();
 
-                
-                    await conn.OpenAsync();
+                var result = await conn.QueryFirstOrDefaultAsync<dynamic>(
+                    "rent_RequestCancellation",
+                    new { RentalID = rentalId, UserID = userId },
+                    commandType: CommandType.StoredProcedure
+                );
 
-                    string checkQuery = "SELECT Status FROM Rentals WHERE RentalID = @RentalID AND UserID = @UserID";
-                    using var checkCmd = new SqlCommand(checkQuery, conn);
-                    checkCmd.Parameters.AddWithValue("@RentalID", rentalId);
-                    checkCmd.Parameters.AddWithValue("@UserID", userId);
+                if (result != null && result.StatusCode == 200)
+                {
+                    string userName = result.UserName ?? $"User #{userId}";
 
-                    var statusResult = await checkCmd.ExecuteScalarAsync();
-                    if (statusResult == null)
-                    {
-                        response.StatusCode = 404;
-                        response.Message = "Rental not found.";
-                        return response;
-                    }
+                    await _notificationRepo.CreateNotification(userId, rentalId,
+                        $"You requested cancellation for Rental #{rentalId}. Please wait for review.");
 
-                    string currentStatus = statusResult.ToString();
-                    if (currentStatus == "Completed" || currentStatus == "Returned" || currentStatus == "Cancelled")
-                    {
-                        response.StatusCode = 400;
-                        response.Message = $"Cannot cancel a rental that is already {currentStatus}.";
-                        return response;
-                    }
+                    await _notificationRepo.CreateNotification(1, rentalId,
+                        $"User {userName} requested to cancel Rental #{rentalId}. Review needed.");
 
-                string userQuery = "SELECT FirstName + ' ' + LastName FROM Users WHERE Id = @UserID";
-                using var userCmd = new SqlCommand(userQuery, conn);
-                userCmd.Parameters.AddWithValue("@UserID", userId);
-                var nameResult = await userCmd.ExecuteScalarAsync();
-
-                string userName = nameResult != null ? nameResult.ToString() : $"User #{userId}";
-
-                string updateQuery = "UPDATE Rentals SET Status = 'Cancellation Requested', UpdatedAt = GETDATE() WHERE RentalID = @RentalID";
-                    using var updateCmd = new SqlCommand(updateQuery, conn);
-                    updateCmd.Parameters.AddWithValue("@RentalID", rentalId);
-                    await updateCmd.ExecuteNonQueryAsync();
-
-                    await _notificationRepo.CreateNotification(userId, rentalId, $"You requested cancellation for Rental #{rentalId}. Please wait for review.");
-                    await _notificationRepo.CreateNotification(1, rentalId, $"User {userName} requested to cancel Rental #{rentalId}. Review needed.");
-
-                response.Data = true;
+                    response.Data = true;
                     response.StatusCode = 200;
-                    response.Message = "Cancellation request submitted successfully.";
-                
+                    response.Message = result.Message;
+                }
+                else
+                {
+                    response.StatusCode = result?.StatusCode ?? 400;
+                    response.Message = result?.Message ?? "Action failed.";
+                }
             }
             catch (Exception ex)
             {
                 response.StatusCode = 500;
                 response.Message = $"Error: {ex.Message}";
             }
-            finally{
-                await conn.CloseAsync();
+            finally
+            {
+                if (conn.State == ConnectionState.Open) await conn.CloseAsync();
             }
             return response;
         }
@@ -661,116 +379,79 @@ namespace CarRental.Server
         {
             var response = new ServiceResponse<bool>();
 
-            if (action == "Approved")
+            try
             {
-                return await _paymentRepo.ProcessCancellationRefunds(rentalId);
-            }
-            else if (action == "Rejected")
-            {
-                    await conn.OpenAsync();
-                    string updateQuery = "UPDATE Rentals SET Status = 'Approved', UpdatedAt = GETDATE() OUTPUT INSERTED.UserID WHERE RentalID = @RentalID";
-                    using var cmd = new SqlCommand(updateQuery, conn);
-                    cmd.Parameters.AddWithValue("@RentalID", rentalId);
-                    var result = await cmd.ExecuteScalarAsync();
+                if (action == "Approved")
+                {
+                    return await _paymentRepo.ProcessCancellationRefunds(rentalId);
+                }
 
-                    if (result != null)
+                if (action == "Rejected")
+                {
+                    if (conn.State == ConnectionState.Closed) await conn.OpenAsync();
+
+                    var info = await conn.QueryFirstOrDefaultAsync<dynamic>(
+                        "rent_ReviewCancellationReject",
+                        new { RentalID = rentalId },
+                        commandType: CommandType.StoredProcedure
+                    );
+
+                    if (info != null)
                     {
-                        int userId = Convert.ToInt32(result);
+                        int userId = info.UserID;
+                        string userEmail = info.Email;
+                        string rejectMsg = "Your cancellation request has been rejected. Your booking remains Approved.";
 
-                    string emailQuery = "SELECT Email FROM Users WHERE Id = @UserID";
-                    using var emailCmd = new SqlCommand(emailQuery, conn);
-                    emailCmd.Parameters.AddWithValue("@UserID", userId);
-                    var emailResult = await emailCmd.ExecuteScalarAsync();
-
-                    string userEmail = emailResult?.ToString();
-
-                    string rejectMsg = "Your cancellation request has been rejected. Your booking remains Approved.";
                         await _notificationRepo.CreateNotification(userId, rentalId, rejectMsg);
+                        if (!string.IsNullOrEmpty(userEmail))
+                        {
+                            await _emailService.SendEmailAsync(userEmail, "Cancellation Request Rejected", rejectMsg);
+                        }
 
-                    if (!string.IsNullOrEmpty(userEmail))
+                        response.Data = true;
+                        response.StatusCode = 200;
+                        response.Message = "Cancellation request rejected. Rental reverted to Approved.";
+                    }
+                    else
                     {
-                         await _emailService.SendEmailAsync(userEmail, "Cancellation Request Approved", rejectMsg);
+                        response.StatusCode = 404;
+                        response.Message = "Rental not found.";
                     }
-                    }
-
-                    response.Data = true;
-                    response.StatusCode = 200;
-                    response.Message = "Cancellation request rejected. Rental reverted to Approved.";
                     return response;
                 }
-            
 
-            response.StatusCode = 400;
-            response.Message = "Invalid action.";
+                response.StatusCode = 400;
+                response.Message = "Invalid action.";
+            }
+            catch (Exception ex)
+            {
+                response.StatusCode = 500;
+                response.Message = $"Error: {ex.Message}";
+            }
+            finally
+            {
+                if (conn.State == ConnectionState.Open) await conn.CloseAsync();
+            }
+
             return response;
         }
 
         public async Task<ServiceResponse<List<Rental>>> GetRentalsByUserId(int userId)
         {
             var response = new ServiceResponse<List<Rental>>();
-            var list = new List<Rental>();
 
             try
             {
-                if (conn.State != System.Data.ConnectionState.Open)
-                {
+                if (conn.State == ConnectionState.Closed)
                     await conn.OpenAsync();
-                }
 
-                string query = @"
-            SELECT r.*, 
-                   CONCAT(u.FirstName, ' ', u.LastName) AS UserName,
-                   c.CarName,
-                   p.Amount AS AmountPaid,
-                   p.PayMongoRef AS PaymentReference
-            FROM Rentals r
-            LEFT JOIN Users u ON r.UserID = u.Id
-            LEFT JOIN Cars c ON r.CarID = c.CarID
-            OUTER APPLY (
-                SELECT TOP 1 Amount, PayMongoRef 
-                FROM Payment 
-                WHERE RentalID = r.RentalID
-                ORDER BY CreatedAt DESC
-            ) p
-            WHERE r.UserID = @UserID
-            ORDER BY r.CreatedAt DESC";
+                var rentals = await conn.QueryAsync<Rental>(
+                    "rent_GetRentalsByUserId",
+                    new { UserId = userId },
+                    commandType: CommandType.StoredProcedure
+                );
 
-                using (SqlCommand cmd = new SqlCommand(query, conn))
-                {
-                    cmd.Parameters.AddWithValue("@UserID", userId);
-
-                    using (SqlDataReader reader = await cmd.ExecuteReaderAsync())
-                    {
-                        while (await reader.ReadAsync())
-                        {
-                            list.Add(new Rental
-                            {
-                                RentalID = Convert.ToInt32(reader["RentalID"]),
-                                UserID = Convert.ToInt32(reader["UserID"]),
-                                UserName = reader["UserName"] != DBNull.Value ? reader["UserName"].ToString() : "Unknown User",
-                                CarID = Convert.ToInt32(reader["CarID"]),
-                                StartDate = Convert.ToDateTime(reader["StartDate"]),
-                                EndDate = Convert.ToDateTime(reader["EndDate"]),
-                                TotalDays = Convert.ToInt32(reader["TotalDays"]),
-                                TotalPrice = Convert.ToDecimal(reader["TotalPrice"]),
-                                Status = reader["Status"].ToString(),
-                                FullName = reader["FullName"] != DBNull.Value ? reader["FullName"].ToString() : null,
-                                ContactNumber = reader["ContactNumber"] != DBNull.Value ? reader["ContactNumber"].ToString() : null,
-                                PickupLocation = reader["PickupLocation"] != DBNull.Value ? reader["PickupLocation"].ToString() : null,
-                                DriverLicense = reader["DriverLicense"]?.ToString(),
-                                CreatedAt = Convert.ToDateTime(reader["CreatedAt"]),
-                                UpdatedAt = reader["UpdatedAt"] != DBNull.Value ? Convert.ToDateTime(reader["UpdatedAt"]) : DateTime.MinValue,
-                                CarName = reader["CarName"] != DBNull.Value ? reader["CarName"].ToString() : "Unknown Car",
-                                PenaltyFee = reader["PenaltyFee"] != DBNull.Value ? Convert.ToDecimal(reader["PenaltyFee"]) : 0,
-                                IsDeleted = reader["IsDeleted"] != DBNull.Value && Convert.ToBoolean(reader["IsDeleted"]),
-                                Amount = reader["AmountPaid"] != DBNull.Value ? Convert.ToDecimal(reader["AmountPaid"]) : 0,
-                                PaymentReference = reader["PaymentReference"] != DBNull.Value ? reader["PaymentReference"].ToString() : "N/A"
-                            });
-                        }
-                    }
-                }
-
-                response.Data = list;
+                response.Data = rentals.ToList();
                 response.StatusCode = 200;
                 response.Message = "User rentals retrieved successfully.";
             }
@@ -781,10 +462,8 @@ namespace CarRental.Server
             }
             finally
             {
-                if (conn.State == System.Data.ConnectionState.Open)
-                {
+                if (conn.State == ConnectionState.Open)
                     await conn.CloseAsync();
-                }
             }
 
             return response;
@@ -795,62 +474,40 @@ namespace CarRental.Server
             var response = new ServiceResponse<bool>();
             try
             {
-                if (conn.State != System.Data.ConnectionState.Open)
+                if (conn.State == ConnectionState.Closed) await conn.OpenAsync();
+
+                var info = await conn.QueryFirstOrDefaultAsync<dynamic>(
+                    "rent_UpdateRentalStatus",
+                    new { RentalID = rentalId, Status = newStatus },
+                    commandType: CommandType.StoredProcedure
+                );
+
+                if (info != null)
                 {
-                    await conn.OpenAsync();
+                    int userId = info.UserID;
+                    string userEmail = info.Email;
+
+                    string message = newStatus == "On the Way"
+                        ? "🚗 Good news! Your rented car is now on the way to your location."
+                        : "✅ Your rented car has been delivered. Please note that cancellation is no longer allowed.";
+
+                    string subject = $"Car Rental Update: {newStatus}";
+
+                    await _notificationRepo.CreateNotification(userId, rentalId, message);
+
+                    if (!string.IsNullOrEmpty(userEmail))
+                    {
+                        await _emailService.SendEmailAsync(userEmail, subject, message);
+                    }
+
+                    response.Data = true;
+                    response.StatusCode = 200;
+                    response.Message = $"Status successfully updated to {newStatus}";
                 }
-                string query = @"
-                    UPDATE Rentals 
-                    SET Status = @Status, UpdatedAt = GETDATE() 
-                    OUTPUT INSERTED.UserID 
-                    WHERE RentalID = @RentalID";
-
-                using (SqlCommand cmd = new SqlCommand(query, conn))
+                else
                 {
-                    cmd.Parameters.AddWithValue("@Status", newStatus);
-                    cmd.Parameters.AddWithValue("@RentalID", rentalId);
-
-                    var result = await cmd.ExecuteScalarAsync();
-
-                    if (result != null)
-                    {
-                        int userId = Convert.ToInt32(result);
-
-                        string userEmail = "";
-                        string emailQuery = "SELECT Email FROM Users WHERE Id = @UserID";
-                        using (SqlCommand emailCmd = new SqlCommand(emailQuery, conn))
-                        {
-                            emailCmd.Parameters.AddWithValue("@UserID", userId);
-                            var emailResult = await emailCmd.ExecuteScalarAsync();
-                            if (emailResult != null && emailResult != DBNull.Value)
-                            {
-                                userEmail = emailResult.ToString();
-                            }
-                        }
-
-                        string message = newStatus == "On the Way"
-                            ? "🚗 Good news! Your rented car is now on the way to your location."
-                            : "✅ Your rented car has been delivered. Please note that cancellation is no longer allowed.";
-                        string subject = $"Car Rental Update: {newStatus}";
-
-                        // Send In-App Notification
-                        await _notificationRepo.CreateNotification(userId, rentalId, message);
-
-                        // Send Email Notification
-                        if (!string.IsNullOrEmpty(userEmail))
-                        {
-                            await _emailService.SendEmailAsync(userEmail, subject, message);
-                        }
-
-                        response.Data = true;
-                        response.StatusCode = 200;
-                        response.Message = $"Status successfully updated to {newStatus}";
-                    }
-                    else
-                    {
-                        response.StatusCode = 404;
-                        response.Message = "Rental not found";
-                    }
+                    response.StatusCode = 404;
+                    response.Message = "Rental not found";
                 }
             }
             catch (Exception ex)
@@ -860,10 +517,7 @@ namespace CarRental.Server
             }
             finally
             {
-                if (conn.State == System.Data.ConnectionState.Open)
-                {
-                    await conn.CloseAsync();
-                }
+                if (conn.State == ConnectionState.Open) await conn.CloseAsync();
             }
 
             return response;
@@ -874,20 +528,39 @@ namespace CarRental.Server
             var response = new ServiceResponse<bool>();
             try
             {
-                await conn.OpenAsync();
-                string query = "UPDATE Rentals SET Status = 'Return Requested', UpdatedAt = GETDATE() WHERE RentalID = @RentalID";
-                using var cmd = new SqlCommand(query, conn);
-                cmd.Parameters.AddWithValue("@RentalID", rentalId);
-                await cmd.ExecuteNonQueryAsync();
+                if (conn.State == ConnectionState.Closed)
+                    await conn.OpenAsync();
 
-                await _notificationRepo.CreateNotification(1, rentalId, $"User requested to return Rental #{rentalId}. Review needed.");
+                var userId = await conn.QueryFirstOrDefaultAsync<int?>(
+                    "rent_RequestReturn",
+                    new { RentalID = rentalId },
+                    commandType: CommandType.StoredProcedure
+                );
 
-                response.Data = true;
-                response.StatusCode = 200;
-                response.Message = "Return request submitted.";
+                if (userId.HasValue)
+                {
+                    await _notificationRepo.CreateNotification(1, rentalId, $"User requested to return Rental #{rentalId}. Review needed.");
+
+                    response.Data = true;
+                    response.StatusCode = 200;
+                    response.Message = "Return request submitted.";
+                }
+                else
+                {
+                    response.StatusCode = 404;
+                    response.Message = "Rental not found.";
+                }
             }
-            catch (Exception ex) { response.StatusCode = 500; response.Message = ex.Message; }
-            finally { await conn.CloseAsync(); }
+            catch (Exception ex)
+            {
+                response.StatusCode = 500;
+                response.Message = ex.Message;
+            }
+            finally
+            {
+                if (conn.State == ConnectionState.Open)
+                    await conn.CloseAsync();
+            }
 
             return response;
         }
@@ -896,79 +569,76 @@ namespace CarRental.Server
         {
             if (action == "Approved")
             {
-                return await ReturnCar(rentalId);   
+                return await ReturnCar(rentalId);
             }
-            else if (action == "Rejected")
+
+            if (action == "Rejected")
             {
                 var response = new ServiceResponse<object>();
                 try
                 {
-                    await conn.OpenAsync();
-                    string query = "UPDATE Rentals SET Status = 'Rented', UpdatedAt = GETDATE() OUTPUT INSERTED.UserID WHERE RentalID = @RentalID";
-                    using var cmd = new SqlCommand(query, conn);
-                    cmd.Parameters.AddWithValue("@RentalID", rentalId);
-                    var result = await cmd.ExecuteScalarAsync();
+                    if (conn.State == ConnectionState.Closed) await conn.OpenAsync();
 
-                    if (result != null)
+                    var info = await conn.QueryFirstOrDefaultAsync<dynamic>(
+                        "rent_ReviewReturnRequestReject",
+                        new { RentalID = rentalId },
+                        commandType: CommandType.StoredProcedure
+                    );
+
+                    if (info != null)
                     {
-                        int userId = Convert.ToInt32(result);
-
-                        string emailQuery = "SELECT Email FROM Users WHERE Id = @UserID";
-                        using var emailCmd = new SqlCommand(emailQuery, conn);
-                        emailCmd.Parameters.AddWithValue("@UserID", userId);
-                        string userEmail = (await emailCmd.ExecuteScalarAsync())?.ToString();
-
+                        int userId = info.UserID;
+                        string userEmail = info.Email;
                         string msg = $"Your return request was rejected. Reason: {reason}";
+
                         await _notificationRepo.CreateNotification(userId, rentalId, msg);
 
                         if (!string.IsNullOrEmpty(userEmail))
                         {
                             await _emailService.SendEmailAsync(userEmail, "Return Request Rejected", msg);
                         }
+
+                        response.Data = true;
+                        response.StatusCode = 200;
+                        response.Message = "Return rejected. User notified.";
                     }
-                    response.Data = true;
-                    response.StatusCode = 200;
-                    response.Message = "Return rejected. User notified.";
+                    else
+                    {
+                        response.StatusCode = 404;
+                        response.Message = "Rental not found";
+                    }
                 }
-                catch (Exception ex) { response.StatusCode = 500; response.Message = ex.Message; }
-                finally { await conn.CloseAsync(); }
+                catch (Exception ex)
+                {
+                    response.StatusCode = 500;
+                    response.Message = ex.Message;
+                }
+                finally { if (conn.State == ConnectionState.Open) await conn.CloseAsync(); }
+
                 return response;
             }
+
             return new ServiceResponse<object> { StatusCode = 400, Message = "Invalid action" };
         }
 
         public async Task<ServiceResponse<List<BookedDateDto>>> GetBookedDatesForCar(int carId)
         {
             var response = new ServiceResponse<List<BookedDateDto>>();
-            var bookedDates = new List<BookedDateDto>();
 
             try
             {
+                if (conn.State != ConnectionState.Open)
+                {
                     await conn.OpenAsync();
+                }
 
-                    string query = @"
-                        SELECT StartDate, EndDate 
-                        FROM Rentals 
-                        WHERE CarID = @CarID 
-                        AND Status NOT IN ('Cancelled', 'Returned', 'Rejected')";
+                var bookedDates = await conn.QueryAsync<BookedDateDto>(
+                    "sp_GetBookedDatesForCar",
+                    new { CarID = carId },
+                    commandType: CommandType.StoredProcedure
+                );
 
-                    using (var cmd = new SqlCommand(query, conn))
-                    {
-                        cmd.Parameters.AddWithValue("@CarID", carId);
-                        using (var reader = await cmd.ExecuteReaderAsync())
-                        {
-                            while (await reader.ReadAsync())
-                            {
-                                bookedDates.Add(new BookedDateDto
-                                {
-                                    startDate = Convert.ToDateTime(reader["StartDate"]).ToString("yyyy-MM-dd"),
-                                    endDate = Convert.ToDateTime(reader["EndDate"]).ToString("yyyy-MM-dd")
-                                });
-                            }
-                        }
-                    }
-
-                response.Data = bookedDates;
+                response.Data = bookedDates.ToList();
                 response.StatusCode = 200;
                 response.Message = "Booked dates fetched successfully.";
             }
@@ -977,6 +647,10 @@ namespace CarRental.Server
                 response.StatusCode = 500;
                 response.Message = ex.Message;
             }
+            finally
+            {
+                await conn.CloseAsync();
+            }
 
             return response;
         }
@@ -984,32 +658,31 @@ namespace CarRental.Server
         public async Task<ServiceResponse<bool>> MoveToTrash(int rentalId)
         {
             var response = new ServiceResponse<bool>();
+
             try
             {
-                await conn.OpenAsync();
-                
-                string query = @"UPDATE Rentals 
-                 SET IsDeleted = 1, 
-                     IsArchived = 0, 
-                     DeletedAt = GETDATE() 
-                 WHERE RentalID = @RentalID";
-
-                using (var cmd = new SqlCommand(query, conn))
+                if (conn.State != ConnectionState.Open)
                 {
-                    cmd.Parameters.AddWithValue("@RentalID", rentalId);
-                    int rows = await cmd.ExecuteNonQueryAsync();
+                    await conn.OpenAsync();
+                }
 
-                    if (rows > 0)
-                    {
-                        response.Data = true;
-                        response.StatusCode = 200;
-                        response.Message = "Rental moved to trash.";
-                    }
-                    else
-                    {
-                        response.StatusCode = 404;
-                        response.Message = "Rental not found.";
-                    }
+                int rows = await conn.ExecuteAsync(
+                    "rent_MoveToTrash",
+                    new { RentalID = rentalId },
+                    commandType: CommandType.StoredProcedure
+                );
+
+                if (rows > 0)
+                {
+                    response.Data = true;
+                    response.StatusCode = 200;
+                    response.Message = "Rental moved to trash.";
+                }
+                else
+                {
+                    response.Data = false;
+                    response.StatusCode = 404;
+                    response.Message = "Rental not found.";
                 }
             }
             catch (Exception ex)
@@ -1017,41 +690,43 @@ namespace CarRental.Server
                 response.StatusCode = 500;
                 response.Message = ex.Message;
             }
-            finally { await conn.CloseAsync(); }
+            finally
+            {
+                await conn.CloseAsync();
+            }
+
             return response;
         }
 
         public async Task<ServiceResponse<bool>> ArchiveRental(int rentalId)
         {
             var response = new ServiceResponse<bool>();
+
             try
             {
-                
+                if (conn.State != ConnectionState.Open)
+                {
                     await conn.OpenAsync();
+                }
 
-                    string query = @"UPDATE Rentals 
-                                     SET IsDeleted = 0, 
-                                         IsArchived = 1, 
-                                         ArchivedAt = GETDATE() 
-                                     WHERE RentalID = @RentalID";
+                int rows = await conn.ExecuteAsync(
+                    "rent_ArchiveRental",
+                    new { RentalID = rentalId },
+                    commandType: CommandType.StoredProcedure
+                );
 
-                    using (var cmd = new SqlCommand(query, conn))
-                    {
-                        cmd.Parameters.AddWithValue("@RentalID", rentalId);
-                        int rows = await cmd.ExecuteNonQueryAsync();
-
-                        if (rows > 0)
-                        {
-                            response.Data = true;
-                            response.StatusCode = 200;
-                            response.Message = "Rental successfully moved to Archive.";
-                        }
-                        else
-                        {
-                            response.StatusCode = 404;
-                            response.Message = "Rental not found.";
-                        }
-                    }
+                if (rows > 0)
+                {
+                    response.Data = true;
+                    response.StatusCode = 200;
+                    response.Message = "Rental successfully moved to Archive.";
+                }
+                else
+                {
+                    response.Data = false;
+                    response.StatusCode = 404;
+                    response.Message = "Rental not found.";
+                }
             }
             catch (Exception ex)
             {
@@ -1062,38 +737,39 @@ namespace CarRental.Server
             {
                 await conn.CloseAsync();
             }
+
             return response;
         }
 
         public async Task<ServiceResponse<bool>> HideRentalPermanently(int rentalId)
         {
             var response = new ServiceResponse<bool>();
+
             try
             {
+                if (conn.State != ConnectionState.Open)
+                {
                     await conn.OpenAsync();
+                }
 
-                    string query = @"UPDATE Rentals 
-                                     SET IsPermanentlyHidden = 1 
-                                     WHERE RentalID = @RentalID";
+                int rows = await conn.ExecuteAsync(
+                    "rent_HideRentalPermanently",
+                    new { RentalID = rentalId },
+                    commandType: CommandType.StoredProcedure
+                );
 
-                    using (var cmd = new SqlCommand(query, conn))
-                    {
-                        cmd.Parameters.AddWithValue("@RentalID", rentalId);
-                        int rows = await cmd.ExecuteNonQueryAsync();
-
-                        if (rows > 0)
-                        {
-                            response.Data = true;
-                            response.StatusCode = 200;
-                            response.Message = "Rental permanently hidden from user.";
-                        }
-                        else
-                        {
-                            response.StatusCode = 404;
-                            response.Message = "Rental not found.";
-                        }
-                    }
-                
+                if (rows > 0)
+                {
+                    response.Data = true;
+                    response.StatusCode = 200;
+                    response.Message = "Rental permanently hidden from user.";
+                }
+                else
+                {
+                    response.Data = false;
+                    response.StatusCode = 404;
+                    response.Message = "Rental not found.";
+                }
             }
             catch (Exception ex)
             {
@@ -1104,6 +780,7 @@ namespace CarRental.Server
             {
                 await conn.CloseAsync();
             }
+
             return response;
         }
         public async Task<ServiceResponse<bool>> RestoreRental(int rentalId)
@@ -1116,24 +793,23 @@ namespace CarRental.Server
                     await conn.OpenAsync();
                 }
 
-                string query = "UPDATE Rentals SET IsDeleted = 0 WHERE RentalID = @RentalID";
+                int rows = await conn.ExecuteAsync(
+                    "sp_RestoreRental",
+                    new { RentalID = rentalId },
+                    commandType: CommandType.StoredProcedure
+                );
 
-                using (var cmd = new SqlCommand(query, conn))
+                if (rows > 0)
                 {
-                    cmd.Parameters.AddWithValue("@RentalID", rentalId);
-                    int rows = await cmd.ExecuteNonQueryAsync();
-
-                    if (rows > 0)
-                    {
-                        response.Data = true;
-                        response.StatusCode = 200;
-                        response.Message = "Rental successfully restored.";
-                    }
-                    else
-                    {
-                        response.StatusCode = 404;
-                        response.Message = "Rental not found.";
-                    }
+                    response.Data = true;
+                    response.StatusCode = 200;
+                    response.Message = "Rental successfully restored.";
+                }
+                else
+                {
+                    response.Data = false;
+                    response.StatusCode = 404;
+                    response.Message = "Rental not found.";
                 }
             }
             catch (Exception ex)
@@ -1148,6 +824,7 @@ namespace CarRental.Server
                     await conn.CloseAsync();
                 }
             }
+
             return response;
         }
     }
